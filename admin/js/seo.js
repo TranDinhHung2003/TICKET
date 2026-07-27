@@ -2,38 +2,38 @@
 
 var SEO_DEFAULTS = {
   "index.html": {
-    title: "Nhà Xe Thùy Nguyễn — Đặt Vé Xe Limousine & Giường Nằm Uy Tín",
-    description: "Nhà Xe Thùy Nguyễn chuyên tuyến Sài Gòn - Đà Lạt - Nha Trang - Mũi Né - Cần Thơ. Xe limousine, giường nằm đời mới, đặt vé online nhanh chóng, đưa đón tận nơi.",
-    keywords: ["nhà xe Thùy Nguyễn", "vé xe Sài Gòn Đà Lạt", "xe limousine", "đặt vé xe khách online"],
-    schema: '{\n  "@context": "https://schema.org",\n  "@type": "BusCompany",\n  "name": "Nhà Xe Thùy Nguyễn",\n  "telephone": "+84909123456",\n  "aggregateRating": {\n    "@type": "AggregateRating",\n    "ratingValue": "4.9",\n    "reviewCount": "1286"\n  }\n}'
+    title: "Xe Ghép & Taxi Thùy Nguyễn — Đặt Xe Ghép Miền Bắc, Đón Tận Nhà",
+    description: "Xe ghép & taxi Thùy Nguyễn chuyên tuyến Hà Nội - Hải Phòng - Hạ Long - Ninh Bình - Sapa và taxi sân bay Nội Bài. Đi ghép chỉ từ 180.000đ/ghế, bao xe riêng 4-16 chỗ, đón trả tận nhà 24/7.",
+    keywords: ["xe ghép miền Bắc", "xe ghép Hà Nội Hải Phòng", "taxi Nội Bài", "bao xe đường dài"],
+    schema: '{\n  "@context": "https://schema.org",\n  "@type": "TaxiService",\n  "name": "Xe Ghép & Taxi Thùy Nguyễn",\n  "provider": {\n    "@type": "LocalBusiness",\n    "telephone": "+84912345678",\n    "aggregateRating": {\n      "@type": "AggregateRating",\n      "ratingValue": "4.9",\n      "reviewCount": "1573"\n    }\n  }\n}'
   },
   "booking.html": {
-    title: "Đặt Vé Xe Online — Nhà Xe Thùy Nguyễn | Chọn Ghế, Thanh Toán Nhanh",
-    description: "Đặt vé xe khách online Nhà Xe Thùy Nguyễn: chọn tuyến, chọn giờ chạy, chọn vị trí ghế và thanh toán chỉ trong 2 phút.",
-    keywords: ["đặt vé xe online", "chọn ghế xe limousine", "vé xe Sài Gòn Đà Lạt"],
-    schema: '{\n  "@context": "https://schema.org",\n  "@type": "WebPage",\n  "name": "Đặt vé xe online",\n  "potentialAction": { "@type": "ReserveAction" }\n}'
+    title: "Đặt Xe Ghép & Taxi Online — Thùy Nguyễn | Chọn Ghế, Bao Xe, Thanh Toán Nhanh",
+    description: "Đặt xe ghép và taxi online Thùy Nguyễn: chọn tuyến miền Bắc, chọn khung giờ, chọn ghế hoặc bao xe riêng, đón tận nhà chỉ trong 2 phút.",
+    keywords: ["đặt xe ghép online", "bao xe taxi đường dài", "xe ghép Hà Nội Sapa"],
+    schema: '{\n  "@context": "https://schema.org",\n  "@type": "WebPage",\n  "name": "Đặt xe ghép & taxi online",\n  "potentialAction": { "@type": "ReserveAction" }\n}'
   },
   "about.html": {
-    title: "Về Chúng Tôi — Nhà Xe Thùy Nguyễn | 12 Năm Vận Tải Hành Khách Uy Tín",
-    description: "Tìm hiểu về Nhà Xe Thùy Nguyễn: hành trình 12 năm phát triển, đội xe 45 chiếc đời mới và cam kết chất lượng dịch vụ hàng đầu.",
-    keywords: ["giới thiệu nhà xe", "đội xe limousine", "cam kết chất lượng"],
-    schema: '{\n  "@context": "https://schema.org",\n  "@type": "AboutPage",\n  "name": "Về Nhà Xe Thùy Nguyễn"\n}'
+    title: "Về Chúng Tôi — Xe Ghép & Taxi Thùy Nguyễn | 10 Năm Phục Vụ Miền Bắc",
+    description: "Tìm hiểu về Xe Ghép & Taxi Thùy Nguyễn: hành trình 10 năm phát triển tại miền Bắc, đội xe 60 chiếc 4-16 chỗ đời mới và cam kết đón đúng giờ, giá minh bạch.",
+    keywords: ["giới thiệu xe ghép Thùy Nguyễn", "đội xe taxi đường dài", "cam kết chất lượng"],
+    schema: '{\n  "@context": "https://schema.org",\n  "@type": "AboutPage",\n  "name": "Về Xe Ghép & Taxi Thùy Nguyễn"\n}'
   },
   "blog.html": {
-    title: "Cẩm Nang Du Lịch & Kinh Nghiệm Đi Xe — Blog Nhà Xe Thùy Nguyễn",
-    description: "Cẩm nang du lịch Đà Lạt, Nha Trang, Mũi Né; kinh nghiệm đi xe giường nằm, mẹo đặt vé giá tốt và thông tin tuyến đường mới nhất.",
-    keywords: ["cẩm nang du lịch Đà Lạt", "kinh nghiệm đi xe giường nằm", "blog nhà xe"],
-    schema: '{\n  "@context": "https://schema.org",\n  "@type": "Blog",\n  "name": "Blog Nhà Xe Thùy Nguyễn"\n}'
+    title: "Cẩm Nang Du Lịch Miền Bắc & Kinh Nghiệm Đi Xe Ghép — Blog Thùy Nguyễn",
+    description: "Cẩm nang du lịch Sapa, Hạ Long, Ninh Bình; kinh nghiệm đi xe ghép, bảng giá các tuyến và mẹo đặt xe sân bay Nội Bài.",
+    keywords: ["cẩm nang du lịch Sapa", "kinh nghiệm đi xe ghép", "blog xe ghép miền Bắc"],
+    schema: '{\n  "@context": "https://schema.org",\n  "@type": "Blog",\n  "name": "Blog Xe Ghép & Taxi Thùy Nguyễn"\n}'
   },
   "contact.html": {
-    title: "Liên Hệ — Nhà Xe Thùy Nguyễn | Hotline 0909 123 456 (24/7)",
-    description: "Liên hệ Nhà Xe Thùy Nguyễn: hotline 0909 123 456 hoạt động 24/7, văn phòng tại TP.HCM, Đà Lạt và Nha Trang. Gửi góp ý trực tuyến.",
-    keywords: ["liên hệ nhà xe", "hotline đặt vé xe"],
-    schema: '{\n  "@context": "https://schema.org",\n  "@type": "ContactPage",\n  "name": "Liên hệ Nhà Xe Thùy Nguyễn"\n}'
+    title: "Liên Hệ — Xe Ghép & Taxi Thùy Nguyễn | Hotline 0912 345 678 (24/7)",
+    description: "Liên hệ Xe Ghép & Taxi Thùy Nguyễn: hotline 0912 345 678 hoạt động 24/7, văn phòng tại Hà Nội, Hải Phòng và Sapa. Gửi góp ý trực tuyến.",
+    keywords: ["liên hệ xe ghép Thùy Nguyễn", "hotline đặt xe ghép"],
+    schema: '{\n  "@context": "https://schema.org",\n  "@type": "ContactPage",\n  "name": "Liên hệ Xe Ghép & Taxi Thùy Nguyễn"\n}'
   }
 };
 
-var STORAGE_KEY = "tn_seo_config";
+var STORAGE_KEY = "tn_seo_config_v2";
 var keywords = [];
 
 function loadConfig() {
@@ -107,7 +107,7 @@ function refreshPreview() {
   document.getElementById("serp-title").textContent = title || "(Chưa có tiêu đề)";
   document.getElementById("serp-desc").textContent = desc || "(Chưa có mô tả)";
   document.getElementById("serp-url").textContent =
-    "https://nhaxethuynguyen.vn/" + (page === "index.html" ? "" : page);
+    "https://xeghepthuynguyen.vn/" + (page === "index.html" ? "" : page);
 
   updateCounter("title-counter", title.length, 60);
   updateCounter("desc-counter", desc.length, 160);

@@ -1,13 +1,13 @@
-/* Quản lý chuyến xe — thêm / sửa / xóa (dữ liệu minh hoạ, lưu trong bộ nhớ trang) */
+/* Quản lý chuyến xe ghép / bao xe — thêm / sửa / xóa (dữ liệu minh hoạ, lưu trong bộ nhớ trang) */
 
 var trips = [
-  { id: 1, route: "Sài Gòn → Đà Lạt", time: "06:00", bus: "Limousine 21 giường", plate: "51B-123.45", price: 290000, seats: 21, status: "active" },
-  { id: 2, route: "Sài Gòn → Đà Lạt", time: "08:30", bus: "Limousine 21 giường", plate: "51B-234.56", price: 290000, seats: 21, status: "active" },
-  { id: 3, route: "Sài Gòn → Nha Trang", time: "11:00", bus: "Giường nằm 34 chỗ", plate: "51B-345.67", price: 320000, seats: 34, status: "active" },
-  { id: 4, route: "Sài Gòn → Mũi Né", time: "13:30", bus: "Limousine 21 giường", plate: "51B-456.78", price: 220000, seats: 21, status: "paused" },
-  { id: 5, route: "Sài Gòn → Cần Thơ", time: "16:00", bus: "Giường nằm 34 chỗ", plate: "51B-567.89", price: 180000, seats: 34, status: "active" },
-  { id: 6, route: "Đà Lạt → Sài Gòn", time: "20:00", bus: "Limousine 21 giường", plate: "49B-678.90", price: 290000, seats: 21, status: "active" },
-  { id: 7, route: "Nha Trang → Sài Gòn", time: "22:30", bus: "Giường nằm 34 chỗ", plate: "79B-789.01", price: 320000, seats: 34, status: "active" }
+  { id: 1, route: "Hà Nội → Hải Phòng", time: "05:00", bus: "MPV 7 chỗ (ghép)", plate: "30A-123.45", price: 250000, seats: 6, status: "active" },
+  { id: 2, route: "Hà Nội → Hải Phòng", time: "07:00", bus: "MPV 7 chỗ (ghép)", plate: "30A-234.56", price: 250000, seats: 6, status: "active" },
+  { id: 3, route: "Hà Nội → Hạ Long", time: "09:00", bus: "MPV 7 chỗ (ghép)", plate: "30A-345.67", price: 300000, seats: 6, status: "active" },
+  { id: 4, route: "Hà Nội → Ninh Bình", time: "13:00", bus: "MPV 7 chỗ (ghép)", plate: "30A-456.78", price: 250000, seats: 6, status: "paused" },
+  { id: 5, route: "Hà Nội → Sapa", time: "07:00", bus: "Limousine 9 chỗ (ghép)", plate: "30A-567.89", price: 450000, seats: 9, status: "active" },
+  { id: 6, route: "Hải Phòng → Hà Nội", time: "17:00", bus: "MPV 7 chỗ (ghép)", plate: "15A-678.90", price: 250000, seats: 6, status: "active" },
+  { id: 7, route: "Hà Nội ↔ Nội Bài", time: "Theo yêu cầu", bus: "Sedan 4 chỗ (taxi)", plate: "30A-789.01", price: 350000, seats: 3, status: "active" }
 ];
 var nextId = 8;
 var editingId = null;
@@ -64,7 +64,7 @@ function editTrip(id) {
   editingId = id;
   document.getElementById("trip-modal-title").textContent = "Cập nhật chuyến xe";
   document.getElementById("t-route").value = t.route;
-  document.getElementById("t-time").value = t.time;
+  document.getElementById("t-time").value = /^\d\d:\d\d$/.test(t.time) ? t.time : "";
   document.getElementById("t-bus").value = t.bus;
   document.getElementById("t-plate").value = t.plate;
   document.getElementById("t-price").value = t.price;
@@ -77,7 +77,7 @@ function saveTrip(e) {
   e.preventDefault();
   var data = {
     route: document.getElementById("t-route").value,
-    time: document.getElementById("t-time").value,
+    time: document.getElementById("t-time").value || "Theo yêu cầu",
     bus: document.getElementById("t-bus").value,
     plate: document.getElementById("t-plate").value.trim(),
     price: parseInt(document.getElementById("t-price").value, 10) || 0,

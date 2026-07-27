@@ -1,4 +1,4 @@
-/* Nhà Xe Thùy Nguyễn — script dùng chung cho trang quản trị */
+/* Xe Ghép & Taxi Thùy Nguyễn — script dùng chung cho trang quản trị */
 
 document.addEventListener("DOMContentLoaded", function () {
   var toggle = document.querySelector(".sidebar-toggle");

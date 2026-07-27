@@ -498,6 +498,71 @@ ul { list-style: none; }
 .legend-dot.taken { background: #e6e9ee; border: 1.5px solid #d4dae2; }
 .legend-dot.mine { background: var(--accent); border: 1.5px solid var(--accent-dark); }
 
+/* Tab chọn loại dịch vụ */
+.service-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+.service-tab {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  padding: 15px 16px;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: all .15s;
+}
+.service-tab:hover { border-color: var(--primary-light); }
+.service-tab.selected { border-color: var(--primary); background: #eef4fb; box-shadow: 0 0 0 3px rgba(27, 90, 148, .12); }
+.service-tab .st-icon { font-size: 27px; }
+.service-tab strong { display: block; font-size: 15px; color: var(--primary); }
+.service-tab span { font-size: 12.5px; color: var(--text-muted); }
+
+/* Sơ đồ ghế xe 7 chỗ */
+.car-cabin {
+  max-width: 250px;
+  margin: 0 auto;
+  background: #fff;
+  border: 2px solid var(--primary);
+  border-radius: 30px 30px 16px 16px;
+  padding: 18px 16px;
+}
+.car-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+.car-row:last-child { margin-bottom: 0; }
+.seat.driver {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary-dark);
+  cursor: default;
+  font-size: 16px;
+}
+.car-row .gap { visibility: hidden; }
+
+/* Chọn loại xe (bao xe riêng) */
+.car-options { display: grid; gap: 12px; }
+.car-option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  padding: 15px 18px;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: all .15s;
+  width: 100%;
+}
+.car-option:hover { border-color: var(--primary-light); }
+.car-option.selected { border-color: var(--primary); background: #eef4fb; box-shadow: 0 0 0 3px rgba(27, 90, 148, .12); }
+.car-option .co-icon { font-size: 30px; }
+.car-option .co-info { flex: 1; }
+.car-option strong { display: block; font-size: 15.5px; color: var(--primary); }
+.car-option span { font-size: 13px; color: var(--text-muted); }
+.car-option .co-price { font-size: 17px; font-weight: 800; color: var(--accent-dark); white-space: nowrap; }
+
 /* Thanh toán */
 .pay-options { display: grid; gap: 12px; }
 .pay-option {

@@ -1,4 +1,4 @@
-/* Nhà Xe Thùy Nguyễn — script dùng chung cho giao diện khách hàng */
+/* Xe Ghép & Taxi Thùy Nguyễn — script dùng chung cho giao diện khách hàng */
 
 // Menu di động
 document.addEventListener("DOMContentLoaded", function () {

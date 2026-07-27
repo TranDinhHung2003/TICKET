@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Quản lý đặt vé — Quản trị Nhà Xe Thùy Nguyễn</title>
+  <title>Quản lý đặt vé — Quản trị Xe Ghép & Taxi Thùy Nguyễn</title>
   <meta name="robots" content="noindex, nofollow">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -15,14 +15,14 @@
 
   <aside class="sidebar">
     <a class="sidebar-brand" href="index.html">
-      <span class="logo" aria-hidden="true">🚌</span>
+      <span class="logo" aria-hidden="true">🚕</span>
       <span>Thùy Nguyễn<small>Bảng quản trị</small></span>
     </a>
     <nav class="sidebar-nav" aria-label="Menu quản trị">
       <p class="group-label">Vận hành</p>
       <a href="index.html">📊 Dashboard</a>
-      <a href="trips.html">🚌 Quản lý chuyến xe</a>
-      <a href="bookings.html" class="active" aria-current="page">🎫 Quản lý đặt vé</a>
+      <a href="trips.html">🚕 Quản lý chuyến xe</a>
+      <a href="bookings.html" class="active" aria-current="page">🎫 Quản lý đặt xe</a>
       <p class="group-label">Marketing</p>
       <a href="seo.html">🔍 Quản lý SEO</a>
     </nav>
@@ -36,7 +36,7 @@
       <div style="display:flex;align-items:center;gap:14px">
         <button class="sidebar-toggle" aria-label="Mở menu">☰</button>
         <div>
-          <h1>Quản lý đặt vé</h1>
+          <h1>Quản lý đặt xe</h1>
           <span class="sub" id="today-label"></span>
         </div>
       </div>
@@ -50,10 +50,10 @@
 
     <main class="admin-content">
       <!-- Đếm theo trạng thái -->
-      <section class="stat-cards" aria-label="Thống kê vé theo trạng thái">
+      <section class="stat-cards" aria-label="Thống kê đơn đặt xe theo trạng thái">
         <div class="stat-card">
           <span class="stat-icon amber" aria-hidden="true">⏳</span>
-          <div><strong id="cnt-pending">0</strong><span>Vé chờ duyệt</span></div>
+          <div><strong id="cnt-pending">0</strong><span>Đơn chờ duyệt</span></div>
         </div>
         <div class="stat-card">
           <span class="stat-icon blue" aria-hidden="true">📋</span>
@@ -71,9 +71,9 @@
 
       <section class="panel" aria-labelledby="bookings-title">
         <div class="panel-head">
-          <h2 id="bookings-title">Danh sách vé đặt</h2>
+          <h2 id="bookings-title">Danh sách đơn đặt xe</h2>
           <div class="filter-bar">
-            <input type="search" id="bk-search" placeholder="🔍 Tìm mã vé, tên khách, SĐT...">
+            <input type="search" id="bk-search" placeholder="🔍 Tìm mã chuyến, tên khách, SĐT...">
             <select id="bk-filter-status">
               <option value="all">Tất cả trạng thái</option>
               <option value="pending">Chờ duyệt</option>
@@ -87,9 +87,9 @@
           <table class="data">
             <thead>
               <tr>
-                <th>Mã vé</th>
+                <th>Mã chuyến</th>
                 <th>Khách hàng</th>
-                <th>Chuyến đi</th>
+                <th>Chuyến đi / Dịch vụ</th>
                 <th>Tổng tiền</th>
                 <th>Thanh toán</th>
                 <th>Trạng thái</th>

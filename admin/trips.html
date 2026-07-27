@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Quản lý chuyến xe — Quản trị Nhà Xe Thùy Nguyễn</title>
+  <title>Quản lý chuyến xe — Quản trị Xe Ghép & Taxi Thùy Nguyễn</title>
   <meta name="robots" content="noindex, nofollow">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -15,14 +15,14 @@
 
   <aside class="sidebar">
     <a class="sidebar-brand" href="index.html">
-      <span class="logo" aria-hidden="true">🚌</span>
+      <span class="logo" aria-hidden="true">🚕</span>
       <span>Thùy Nguyễn<small>Bảng quản trị</small></span>
     </a>
     <nav class="sidebar-nav" aria-label="Menu quản trị">
       <p class="group-label">Vận hành</p>
       <a href="index.html">📊 Dashboard</a>
-      <a href="trips.html" class="active" aria-current="page">🚌 Quản lý chuyến xe</a>
-      <a href="bookings.html">🎫 Quản lý đặt vé</a>
+      <a href="trips.html" class="active" aria-current="page">🚕 Quản lý chuyến xe</a>
+      <a href="bookings.html">🎫 Quản lý đặt xe</a>
       <p class="group-label">Marketing</p>
       <a href="seo.html">🔍 Quản lý SEO</a>
     </nav>
@@ -52,7 +52,7 @@
             <h2 id="trips-title">Danh sách chuyến xe <span class="badge blue" id="trip-count">0 chuyến</span></h2>
           </div>
           <div class="filter-bar">
-            <input type="search" id="trip-search" placeholder="🔍 Tìm tuyến, biển số, loại xe...">
+            <input type="search" id="trip-search" placeholder="🔍 Tìm tuyến, biển số, loại xe (ghép/taxi)...">
             <select id="trip-filter-status">
               <option value="all">Tất cả trạng thái</option>
               <option value="active">Đang chạy</option>
@@ -68,7 +68,7 @@
                 <th>Giờ chạy</th>
                 <th>Biển số</th>
                 <th>Số ghế</th>
-                <th>Giá vé</th>
+                <th>Giá vé / cuốc</th>
                 <th>Trạng thái</th>
                 <th>Thao tác</th>
               </tr>
@@ -94,37 +94,42 @@
           <div class="field full">
             <label for="t-route">Tuyến đường *</label>
             <select id="t-route" required>
-              <option>Sài Gòn → Đà Lạt</option>
-              <option>Đà Lạt → Sài Gòn</option>
-              <option>Sài Gòn → Nha Trang</option>
-              <option>Nha Trang → Sài Gòn</option>
-              <option>Sài Gòn → Mũi Né</option>
-              <option>Sài Gòn → Cần Thơ</option>
+              <option>Hà Nội → Hải Phòng</option>
+              <option>Hải Phòng → Hà Nội</option>
+              <option>Hà Nội → Hạ Long</option>
+              <option>Hạ Long → Hà Nội</option>
+              <option>Hà Nội → Ninh Bình</option>
+              <option>Ninh Bình → Hà Nội</option>
+              <option>Hà Nội → Sapa</option>
+              <option>Sapa → Hà Nội</option>
+              <option>Hà Nội ↔ Nội Bài</option>
             </select>
           </div>
           <div class="field">
-            <label for="t-time">Giờ khởi hành *</label>
-            <input type="time" id="t-time" value="06:00" required>
+            <label for="t-time">Giờ khởi hành</label>
+            <input type="time" id="t-time" value="05:00">
+            <p class="help">Bỏ trống nếu là bao xe / taxi chạy theo yêu cầu.</p>
           </div>
           <div class="field">
             <label for="t-plate">Biển số xe *</label>
-            <input type="text" id="t-plate" placeholder="51B-123.45" required>
+            <input type="text" id="t-plate" placeholder="30A-123.45" required>
           </div>
           <div class="field">
             <label for="t-bus">Loại xe</label>
             <select id="t-bus">
-              <option>Limousine 21 giường</option>
-              <option>Giường nằm 34 chỗ</option>
-              <option>Ghế ngồi 16 chỗ</option>
+              <option>MPV 7 chỗ (ghép)</option>
+              <option>Limousine 9 chỗ (ghép)</option>
+              <option>Sedan 4 chỗ (taxi)</option>
+              <option>Limousine 16 chỗ (bao xe)</option>
             </select>
           </div>
           <div class="field">
-            <label for="t-seats">Số ghế</label>
-            <input type="number" id="t-seats" min="1" max="50" value="21">
+            <label for="t-seats">Số ghế bán</label>
+            <input type="number" id="t-seats" min="1" max="16" value="6">
           </div>
           <div class="field">
-            <label for="t-price">Giá vé (VNĐ) *</label>
-            <input type="number" id="t-price" min="0" step="10000" value="290000" required>
+            <label for="t-price">Giá vé / cuốc (VNĐ) *</label>
+            <input type="number" id="t-price" min="0" step="10000" value="250000" required>
           </div>
           <div class="field">
             <label for="t-status">Trạng thái</label>
