@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quản lý đặt vé — Quản trị Nhà Xe Thùy Nguyễn</title>
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/admin.css">
+</head>
+<body>
+<div class="admin-layout">
+
+  <aside class="sidebar">
+    <a class="sidebar-brand" href="index.html">
+      <span class="logo" aria-hidden="true">🚌</span>
+      <span>Thùy Nguyễn<small>Bảng quản trị</small></span>
+    </a>
+    <nav class="sidebar-nav" aria-label="Menu quản trị">
+      <p class="group-label">Vận hành</p>
+      <a href="index.html">📊 Dashboard</a>
+      <a href="trips.html">🚌 Quản lý chuyến xe</a>
+      <a href="bookings.html" class="active" aria-current="page">🎫 Quản lý đặt vé</a>
+      <p class="group-label">Marketing</p>
+      <a href="seo.html">🔍 Quản lý SEO</a>
+    </nav>
+    <div class="sidebar-foot">
+      <a href="../index.html">← Về trang khách hàng</a>
+    </div>
+  </aside>
+
+  <div class="admin-main">
+    <header class="admin-topbar">
+      <div style="display:flex;align-items:center;gap:14px">
+        <button class="sidebar-toggle" aria-label="Mở menu">☰</button>
+        <div>
+          <h1>Quản lý đặt vé</h1>
+          <span class="sub" id="today-label"></span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="admin-user">
+          <span class="avatar" aria-hidden="true">T</span>
+          <span>Admin Thùy Nguyễn</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="admin-content">
+      <!-- Đếm theo trạng thái -->
+      <section class="stat-cards" aria-label="Thống kê vé theo trạng thái">
+        <div class="stat-card">
+          <span class="stat-icon amber" aria-hidden="true">⏳</span>
+          <div><strong id="cnt-pending">0</strong><span>Vé chờ duyệt</span></div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon blue" aria-hidden="true">📋</span>
+          <div><strong id="cnt-approved">0</strong><span>Đã duyệt — chờ thanh toán</span></div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon green" aria-hidden="true">✅</span>
+          <div><strong id="cnt-paid">0</strong><span>Đã thanh toán</span></div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon red" aria-hidden="true">🚫</span>
+          <div><strong id="cnt-cancelled">0</strong><span>Đã hủy</span></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="bookings-title">
+        <div class="panel-head">
+          <h2 id="bookings-title">Danh sách vé đặt</h2>
+          <div class="filter-bar">
+            <input type="search" id="bk-search" placeholder="🔍 Tìm mã vé, tên khách, SĐT...">
+            <select id="bk-filter-status">
+              <option value="all">Tất cả trạng thái</option>
+              <option value="pending">Chờ duyệt</option>
+              <option value="approved">Đã duyệt</option>
+              <option value="paid">Đã thanh toán</option>
+              <option value="cancelled">Đã hủy</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>Mã vé</th>
+                <th>Khách hàng</th>
+                <th>Chuyến đi</th>
+                <th>Tổng tiền</th>
+                <th>Thanh toán</th>
+                <th>Trạng thái</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody id="bookings-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="js/admin.js"></script>
+<script src="js/bookings.js"></script>
+</body>
+</html>

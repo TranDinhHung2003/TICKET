@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quản lý SEO — Quản trị Nhà Xe Thùy Nguyễn</title>
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/admin.css">
+</head>
+<body>
+<div class="admin-layout">
+
+  <aside class="sidebar">
+    <a class="sidebar-brand" href="index.html">
+      <span class="logo" aria-hidden="true">🚌</span>
+      <span>Thùy Nguyễn<small>Bảng quản trị</small></span>
+    </a>
+    <nav class="sidebar-nav" aria-label="Menu quản trị">
+      <p class="group-label">Vận hành</p>
+      <a href="index.html">📊 Dashboard</a>
+      <a href="trips.html">🚌 Quản lý chuyến xe</a>
+      <a href="bookings.html">🎫 Quản lý đặt vé</a>
+      <p class="group-label">Marketing</p>
+      <a href="seo.html" class="active" aria-current="page">🔍 Quản lý SEO</a>
+    </nav>
+    <div class="sidebar-foot">
+      <a href="../index.html">← Về trang khách hàng</a>
+    </div>
+  </aside>
+
+  <div class="admin-main">
+    <header class="admin-topbar">
+      <div style="display:flex;align-items:center;gap:14px">
+        <button class="sidebar-toggle" aria-label="Mở menu">☰</button>
+        <div>
+          <h1>Quản lý SEO</h1>
+          <span class="sub" id="today-label"></span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="admin-user">
+          <span class="avatar" aria-hidden="true">T</span>
+          <span>Admin Thùy Nguyễn</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="admin-content">
+      <section class="panel" aria-labelledby="seo-title-head">
+        <div class="panel-head">
+          <h2 id="seo-title-head">Cấu hình SEO theo từng trang</h2>
+          <div class="filter-bar">
+            <label for="seo-page" style="font-size:13.5px;font-weight:700;color:#64748b">Trang:</label>
+            <select id="seo-page">
+              <option value="index.html">Trang chủ (index.html)</option>
+              <option value="booking.html">Đặt vé (booking.html)</option>
+              <option value="about.html">Về chúng tôi (about.html)</option>
+              <option value="blog.html">Cẩm nang (blog.html)</option>
+              <option value="contact.html">Liên hệ (contact.html)</option>
+            </select>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="form-grid">
+            <div class="field full">
+              <label for="seo-title">Meta Title</label>
+              <input type="text" id="seo-title" placeholder="Tiêu đề hiển thị trên Google...">
+              <p class="counter" id="title-counter">0 / 60 ký tự</p>
+            </div>
+            <div class="field full">
+              <label for="seo-desc">Meta Description</label>
+              <textarea id="seo-desc" rows="3" placeholder="Mô tả ngắn gọn nội dung trang..."></textarea>
+              <p class="counter" id="desc-counter">0 / 160 ký tự</p>
+            </div>
+            <div class="field full">
+              <label for="kw-input">Từ khóa (Keywords)</label>
+              <input type="text" id="kw-input" placeholder="Nhập từ khóa rồi nhấn Enter...">
+              <div class="tag-chips" id="kw-chips"></div>
+              <p class="help">Nhấn Enter hoặc dấu phẩy để thêm từ khóa. Nhấn ✕ để xóa.</p>
+            </div>
+            <div class="field full">
+              <label for="seo-schema">Schema Markup (JSON-LD)</label>
+              <textarea id="seo-schema" rows="10" spellcheck="false" style="font-family:monospace;font-size:13px"></textarea>
+              <p class="help">Dán mã JSON-LD hợp lệ. Hệ thống sẽ kiểm tra cú pháp trước khi lưu.</p>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="saveSeo()">💾 Lưu cấu hình</button>
+            <button class="btn btn-ghost" onclick="resetSeo()">↺ Khôi phục mặc định</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="serp-head">
+        <div class="panel-head">
+          <h2 id="serp-head">Xem trước trên Google</h2>
+          <span class="hint">Cập nhật trực tiếp khi bạn gõ</span>
+        </div>
+        <div class="panel-body">
+          <div class="serp-preview">
+            <p class="serp-url" id="serp-url">https://nhaxethuynguyen.vn/</p>
+            <p class="serp-title" id="serp-title">—</p>
+            <p class="serp-desc" id="serp-desc">—</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="js/admin.js"></script>
+<script src="js/seo.js"></script>
+</body>
+</html>
