@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS licenses (
     last_ip         TEXT,
     activated_at    TEXT,
     last_seen_at    TEXT,
-    activate_count  INTEGER NOT NULL DEFAULT 0
+    activate_count  INTEGER NOT NULL DEFAULT 0,
+    blocked_machine_id TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_licenses_machine ON licenses(machine_id);
 """
@@ -83,6 +84,15 @@ def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        # Migrate DB cũ
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(licenses)").fetchall()
+        }
+        if "blocked_machine_id" not in cols:
+            conn.execute(
+                "ALTER TABLE licenses ADD COLUMN blocked_machine_id TEXT DEFAULT ''"
+            )
 
 
 def create_license(
@@ -229,13 +239,30 @@ def create_app() -> Flask:
             if not row:
                 return jsonify({"ok": False, "error": "Token không tồn tại"}), 404
             if row["revoked"]:
-                return jsonify({"ok": False, "error": "Token đã bị thu hồi"}), 403
+                return jsonify({
+                    "ok": False,
+                    "error": "Token đã bị thu hồi",
+                    "code": "revoked",
+                }), 403
             exp = _parse_iso(row["expires_at"])
             if now >= exp:
                 return jsonify({
                     "ok": False,
                     "error": "Token đã hết hạn",
                     "expires_at": row["expires_at"],
+                    "code": "expired",
+                }), 403
+
+            blocked = (row["blocked_machine_id"] or "").strip().lower()
+            if blocked and blocked == machine_id:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Máy này đã bị gỡ khỏi token (admin reset).\n"
+                        "Không thể kích hoạt lại trên máy cũ. "
+                        "Dùng máy mới hoặc nhận token khác."
+                    ),
+                    "code": "machine_blocked",
                 }), 403
 
             bound = row["machine_id"]
@@ -247,9 +274,11 @@ def create_app() -> Flask:
                         "Mỗi token chỉ dùng được 1 máy. Liên hệ admin để reset."
                     ),
                     "bound_hint": (bound[:8] + "…"),
+                    "code": "bound_other",
                 }), 403
 
             first_ip = row["first_ip"] or ip
+            # Kích hoạt máy mới → xoá blocked nếu khác máy bị block
             conn.execute(
                 """
                 UPDATE licenses SET
@@ -257,9 +286,13 @@ def create_app() -> Flask:
                     machine_name = ?,
                     first_ip = ?,
                     last_ip = ?,
-                    activated_at = COALESCE(activated_at, ?),
+                    activated_at = ?,
                     last_seen_at = ?,
-                    activate_count = activate_count + 1
+                    activate_count = activate_count + 1,
+                    blocked_machine_id = CASE
+                        WHEN blocked_machine_id = ? THEN blocked_machine_id
+                        ELSE blocked_machine_id
+                    END
                 WHERE token = ?
                 """,
                 (
@@ -267,8 +300,9 @@ def create_app() -> Flask:
                     machine_name,
                     first_ip,
                     ip,
+                    _iso(now) if not bound else (row["activated_at"] or _iso(now)),
                     _iso(now),
-                    _iso(now),
+                    machine_id,
                     token,
                 ),
             )
@@ -300,26 +334,46 @@ def create_app() -> Flask:
                 "SELECT * FROM licenses WHERE token = ?", (token,)
             ).fetchone()
             if not row:
-                return jsonify({"ok": False, "error": "Token không tồn tại"}), 404
+                return jsonify({
+                    "ok": False, "error": "Token không tồn tại", "code": "not_found",
+                }), 404
             if row["revoked"]:
-                return jsonify({"ok": False, "error": "Token đã bị thu hồi"}), 403
+                return jsonify({
+                    "ok": False,
+                    "error": "Token đã bị thu hồi",
+                    "code": "revoked",
+                }), 403
             exp = _parse_iso(row["expires_at"])
             if now >= exp:
                 return jsonify({
                     "ok": False,
                     "error": "Token đã hết hạn",
                     "expires_at": row["expires_at"],
+                    "code": "expired",
                 }), 403
-            if not row["machine_id"]:
+
+            blocked = (row["blocked_machine_id"] or "").strip().lower()
+            if blocked and blocked == machine_id:
                 return jsonify({
                     "ok": False,
-                    "error": "Token chưa kích hoạt — hãy activate trước",
+                    "error": "Máy này đã bị gỡ khỏi token — không dùng được nữa",
+                    "code": "machine_blocked",
+                }), 403
+
+            if not row["machine_id"]:
+                # Đã reset — máy cũ/mới đều phải kích hoạt lại thủ công
+                return jsonify({
+                    "ok": False,
+                    "error": "Token chưa gắn máy — cần kích hoạt lại",
+                    "code": "need_activate",
                     "need_activate": True,
                 }), 403
+
             if row["machine_id"] != machine_id:
                 return jsonify({
                     "ok": False,
                     "error": "Token không khớp máy này (đã gắn máy khác)",
+                    "code": "bound_other",
                 }), 403
 
             conn.execute(
@@ -374,38 +428,62 @@ def create_app() -> Flask:
         data = request.get_json(silent=True) or {}
         token = (data.get("token") or "").strip().upper()
         with get_db() as conn:
-            cur = conn.execute(
-                "UPDATE licenses SET revoked = 1 WHERE token = ?", (token,)
-            )
-            if cur.rowcount == 0:
+            # Thu hồi + chặn luôn máy đang gắn
+            row = conn.execute(
+                "SELECT machine_id FROM licenses WHERE token = ?", (token,)
+            ).fetchone()
+            if not row:
                 return jsonify({"ok": False, "error": "Không tìm thấy token"}), 404
+            mid = row["machine_id"] or ""
+            conn.execute(
+                """
+                UPDATE licenses SET
+                    revoked = 1,
+                    blocked_machine_id = CASE
+                        WHEN ? != '' THEN ?
+                        ELSE blocked_machine_id
+                    END
+                WHERE token = ?
+                """,
+                (mid, mid, token),
+            )
         return jsonify({"ok": True, "message": f"Đã thu hồi {token}"})
 
     @app.post("/api/v1/admin/reset-machine")
     def admin_reset_machine():
-        """Cho phép khách đổi máy 1 lần (admin thao tác)."""
+        """Gỡ máy cũ + chặn máy đó kích hoạt lại; chỉ máy mới được gắn."""
         deny = _require_admin()
         if deny:
             return deny
         data = request.get_json(silent=True) or {}
         token = (data.get("token") or "").strip().upper()
         with get_db() as conn:
-            cur = conn.execute(
+            row = conn.execute(
+                "SELECT machine_id FROM licenses WHERE token = ?", (token,)
+            ).fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Không tìm thấy token"}), 404
+            old = row["machine_id"] or ""
+            conn.execute(
                 """
                 UPDATE licenses SET
+                    blocked_machine_id = CASE WHEN ? != '' THEN ? ELSE blocked_machine_id END,
                     machine_id = NULL,
                     machine_name = NULL,
                     activated_at = NULL
                 WHERE token = ?
                 """,
-                (token,),
+                (old, old, token),
             )
-            if cur.rowcount == 0:
-                return jsonify({"ok": False, "error": "Không tìm thấy token"}), 404
-        return jsonify({"ok": True, "message": f"Đã reset máy cho {token}"})
+        return jsonify({
+            "ok": True,
+            "message": (
+                f"Đã reset máy cho {token}. "
+                "Máy cũ bị chặn; chỉ máy mới kích hoạt được."
+            ),
+        })
 
     return app
-
 
 app = create_app()
 

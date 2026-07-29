@@ -29,7 +29,7 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -4397,6 +4397,7 @@ class App(tk.Tk):
             text=(
                 f"Thư mục: {DATA_DIR}\n"
                 "• cookies.json — token/cookies đăng nhập\n"
+                "• license.json — bản quyền đã kích hoạt\n"
                 "• tokens.json — fb_dtsg gần nhất (mở nhanh hơn)\n"
                 "• groups.json — nhóm đã quét\n"
                 "• draft.json + images/ — nội dung bài & ảnh"

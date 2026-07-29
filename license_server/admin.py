@@ -65,30 +65,52 @@ def cmd_revoke(args):
     init_db()
     token = args.token.strip().upper()
     with get_db() as conn:
-        cur = conn.execute(
-            "UPDATE licenses SET revoked = 1 WHERE token = ?", (token,)
-        )
-        if cur.rowcount == 0:
+        row = conn.execute(
+            "SELECT machine_id FROM licenses WHERE token = ?", (token,)
+        ).fetchone()
+        if not row:
             print("Không tìm thấy token", file=sys.stderr)
             sys.exit(1)
-    print(f"Đã thu hồi {token}")
+        mid = row["machine_id"] or ""
+        conn.execute(
+            """
+            UPDATE licenses SET
+                revoked = 1,
+                blocked_machine_id = CASE WHEN ? != '' THEN ? ELSE blocked_machine_id END
+            WHERE token = ?
+            """,
+            (mid, mid, token),
+        )
+    print(f"Đã thu hồi {token} — máy cũ bị chặn ngay khi online lại")
 
 
 def cmd_reset(args):
     init_db()
     token = args.token.strip().upper()
     with get_db() as conn:
-        cur = conn.execute(
-            """
-            UPDATE licenses SET machine_id=NULL, machine_name=NULL, activated_at=NULL
-            WHERE token = ?
-            """,
-            (token,),
-        )
-        if cur.rowcount == 0:
+        row = conn.execute(
+            "SELECT machine_id FROM licenses WHERE token = ?", (token,)
+        ).fetchone()
+        if not row:
             print("Không tìm thấy token", file=sys.stderr)
             sys.exit(1)
-    print(f"Đã reset máy — khách có thể kích hoạt lại trên máy mới: {token}")
+        old = row["machine_id"] or ""
+        conn.execute(
+            """
+            UPDATE licenses SET
+                blocked_machine_id = CASE WHEN ? != '' THEN ? ELSE blocked_machine_id END,
+                machine_id = NULL,
+                machine_name = NULL,
+                activated_at = NULL
+            WHERE token = ?
+            """,
+            (old, old, token),
+        )
+    print(
+        f"Đã reset {token}\n"
+        f"- Máy cũ bị CHẶN (không kích hoạt lại được)\n"
+        f"- Máy MỚI của khách mới kích hoạt được"
+    )
 
 
 def cmd_show(args):

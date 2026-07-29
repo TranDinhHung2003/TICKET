@@ -24,6 +24,9 @@ DATA_DIR = Path.home() / ".fb_poster"
 LICENSE_FILE = DATA_DIR / "license.json"
 CONFIG_FILE = DATA_DIR / "license_config.json"
 
+# Offline chỉ khi MẤT MẠNG — và rất ngắn (sau revoke/reset phải online)
+OFFLINE_GRACE_HOURS = float(os.environ.get("FB_LICENSE_OFFLINE_HOURS", "6"))
+
 
 def _ensure_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,7 +68,6 @@ def get_machine_id() -> str:
         platform.node(),
         str(uuid.getnode()),
     ]
-    # Windows MachineGuid
     try:
         if platform.system() == "Windows":
             import winreg
@@ -79,7 +81,6 @@ def get_machine_id() -> str:
             parts.append(str(guid))
     except Exception:
         pass
-    # Linux machine-id
     try:
         mid = Path("/etc/machine-id")
         if mid.is_file():
@@ -164,6 +165,10 @@ def activate(token: str, timeout: float = 15.0) -> tuple[bool, str, dict]:
         return False, f"Lỗi kích hoạt: {exc}", {}
 
     if not data.get("ok"):
+        # Thu hồi / chặn máy → xoá cache local
+        code = data.get("code") or ""
+        if code in ("revoked", "expired", "machine_blocked", "bound_other"):
+            clear_local_license()
         return False, data.get("error") or f"HTTP {r.status_code}", data
 
     save_local_license({
@@ -175,18 +180,27 @@ def activate(token: str, timeout: float = 15.0) -> tuple[bool, str, dict]:
     return True, data.get("message") or "Kích hoạt thành công", data
 
 
-def verify(timeout: float = 12.0, allow_offline_hours: float = 72.0) -> tuple[bool, str, dict]:
+def verify(
+    timeout: float = 12.0,
+    allow_offline_hours: float | None = None,
+) -> tuple[bool, str, dict]:
     """
     Xác minh token còn hạn + đúng máy.
-    Nếu mất mạng: cho phép offline trong allow_offline_hours nếu đã từng verify OK.
+    - Server trả lỗi (revoked/reset/…) → XOÁ license local ngay.
+    - Không tự activate lại (tránh máy cũ sau reset tự vào lại).
+    - Offline chỉ khi mất mạng và trong thời gian grace ngắn.
     """
+    if allow_offline_hours is None:
+        allow_offline_hours = OFFLINE_GRACE_HOURS
+
     local = load_local_license()
     if not local:
         return False, "Chưa kích hoạt bản quyền — nhập token để tiếp tục", {}
 
     mid = get_machine_id()
     if local.get("machine_id") and local["machine_id"] != mid:
-        return False, "License không khớp máy này", local
+        clear_local_license()
+        return False, "License không khớp máy này — đã xoá bản quyền local", {}
 
     url = get_server_url() + "/api/v1/verify"
     try:
@@ -196,23 +210,30 @@ def verify(timeout: float = 12.0, allow_offline_hours: float = 72.0) -> tuple[bo
             timeout=timeout,
         )
         data = r.json() if r.content else {}
-    except Exception as exc:
-        # Offline grace
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
         last = float(local.get("last_verify_at") or 0)
         age_h = (time.time() - last) / 3600 if last else 9999
         if last and age_h <= allow_offline_hours:
             return True, (
-                f"Offline — dùng tạm (đã xác minh {age_h:.0f}h trước). "
-                f"Cần online trong {allow_offline_hours:.0f}h."
+                f"Offline tạm ({age_h:.0f}h) — cần online sớm. "
+                f"Grace {allow_offline_hours:.0f}h."
             ), local
         return False, f"Không xác minh được (cần mạng): {exc}", local
+    except Exception as exc:
+        return False, f"Lỗi xác minh: {exc}", local
 
-    if data.get("need_activate"):
-        ok, msg, d2 = activate(local["token"])
-        return ok, msg, d2
-
+    # Server đã trả lời — không dùng offline cache khi bị từ chối
     if not data.get("ok"):
-        return False, data.get("error") or "License không hợp lệ", data
+        code = data.get("code") or ""
+        err = data.get("error") or "License không hợp lệ"
+        # Mọi từ chối từ server → xoá local (revoked / reset / hết hạn / sai máy)
+        clear_local_license()
+        if code == "need_activate" or data.get("need_activate"):
+            return False, (
+                "Token đã bị gỡ máy / chưa gắn máy.\n"
+                "Nhập lại token trên máy ĐƯỢC PHÉP (máy mới sau reset)."
+            ), data
+        return False, err, data
 
     local["expires_at"] = data.get("expires_at") or local.get("expires_at")
     local["duration_label"] = data.get("duration_label") or local.get("duration_label")
