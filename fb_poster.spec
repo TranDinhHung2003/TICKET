@@ -24,6 +24,7 @@ a = Analysis(
         'json',
         'threading',
         're',
+        'license_client',
     ],
     hookspath=[],
     hooksconfig={},

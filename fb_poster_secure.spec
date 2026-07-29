@@ -33,6 +33,7 @@ a = Analysis(
         "uuid",
         "pathlib",
         "marshal",
+        "license_client",
     ],
     hookspath=[],
     hooksconfig={},

@@ -11,3 +11,5 @@ fb_cookies.json
 .fb_poster/
 .env
 *.pye
+license_server/licenses.db
+license_server/*.db

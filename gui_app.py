@@ -19,12 +19,17 @@ from urllib.parse import unquote
 
 import requests
 
+try:
+    import license_client as lic
+except ImportError:
+    lic = None  # type: ignore
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.7.0"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -35,6 +40,13 @@ GROUPS_FILE = DATA_DIR / "groups.json"
 DRAFT_FILE = DATA_DIR / "draft.json"
 IMAGES_DIR = DATA_DIR / "images"
 TOKENS_FILE = DATA_DIR / "tokens.json"
+LICENSE_FILE = DATA_DIR / "license.json"
+
+# Server xác minh bản quyền — đổi URL khi bạn deploy
+# hoặc để khách/admin sửa trong Cài đặt.
+DEFAULT_LICENSE_SERVER = os.environ.get(
+    "FB_LICENSE_SERVER", "http://127.0.0.1:8787"
+)
 
 
 def _ensure_data_dir() -> None:
@@ -2654,14 +2666,159 @@ class App(tk.Tk):
         self._posting = False
         self._stop_flag = False
         self._draft_save_job = None
+        self._license_ok = False
 
         # UI trước — mở nhanh; cookies/nhóm/nháp load nền
         self._build_ui()
-        self.after(50, self._bootstrap_saved_data)
+        self.after(80, self._bootstrap_license_then_data)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _bootstrap_license_then_data(self):
+        """Xác minh bản quyền trước, rồi mới load cookies/nhóm."""
+        def _bg():
+            if lic is None:
+                self.after(0, lambda: self._on_license_result(
+                    False, "Thiếu module license_client.py"
+                ))
+                return
+            ok, msg, _data = lic.verify()
+            self.after(0, lambda: self._on_license_result(ok, msg))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_license_result(self, ok: bool, msg: str):
+        self._license_ok = bool(ok)
+        if hasattr(self, "_license_status_var"):
+            self._license_status_var.set(
+                ("✅ " if ok else "❌ ") + (msg or "")
+            )
+        if ok:
+            self._status_var.set(f"🔑 {msg}")
+            self._log(f"Bản quyền: {msg}", "ok")
+            self._bootstrapped_data = True
+            self._bootstrap_saved_data()
+        else:
+            self._status_var.set("🔑 Chưa kích hoạt bản quyền")
+            self._log(f"Bản quyền: {msg}", "warn")
+            self.after(200, self._show_license_dialog)
+
+    def _show_license_dialog(self):
+        """Hộp thoại bắt buộc nhập token."""
+        if getattr(self, "_license_ok", False):
+            return
+        win = tk.Toplevel(self)
+        win.title("Kích hoạt bản quyền")
+        win.configure(bg=COLOR_PANEL)
+        win.geometry("480x360")
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, False)
+
+        tk.Label(
+            win, text="🔑  Nhập mã token để sử dụng app",
+            bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 14, "bold"),
+        ).pack(pady=(22, 6), padx=20, anchor="w")
+        tk.Label(
+            win,
+            text=(
+                "Mua token trên trang web / liên hệ admin.\n"
+                "Mỗi token chỉ kích hoạt được 1 máy. Hết hạn theo gói tháng."
+            ),
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 10),
+            justify="left",
+        ).pack(padx=20, anchor="w")
+
+        token_var = tk.StringVar()
+        SoftEntry(win, textvariable=token_var, width=42).pack(
+            padx=20, pady=(16, 8), fill="x"
+        )
+
+        server_var = tk.StringVar(
+            value=(lic.get_server_url() if lic else DEFAULT_LICENSE_SERVER)
+        )
+        tk.Label(
+            win, text="Server license (URL):", bg=COLOR_PANEL,
+            fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
+        ).pack(padx=20, anchor="w")
+        SoftEntry(win, textvariable=server_var, width=42).pack(
+            padx=20, pady=(4, 8), fill="x"
+        )
+
+        status = tk.Label(
+            win, text="", bg=COLOR_PANEL, fg=COLOR_ERROR,
+            font=("Segoe UI", 9), wraplength=420, justify="left",
+        )
+        status.pack(padx=20, anchor="w")
+
+        def _do_activate():
+            if not lic:
+                status.config(text="Thiếu license_client")
+                return
+            tok = token_var.get().strip()
+            if not tok:
+                status.config(text="Vui lòng nhập token")
+                return
+            url = server_var.get().strip()
+            if url:
+                lic.set_server_url(url)
+            status.config(text="Đang kích hoạt…", fg=COLOR_WARNING)
+            win.update_idletasks()
+
+            def _worker():
+                ok, msg, _ = lic.activate(tok)
+                def _done():
+                    if ok:
+                        self._license_ok = True
+                        status.config(text=f"✅ {msg}", fg=COLOR_SUCCESS)
+                        if hasattr(self, "_license_status_var"):
+                            self._license_status_var.set(f"✅ {msg}")
+                        self._log(f"Kích hoạt OK: {msg}", "ok")
+                        win.after(400, win.destroy)
+                        self._bootstrap_saved_data()
+                    else:
+                        status.config(text=f"❌ {msg}", fg=COLOR_ERROR)
+                self.after(0, _done)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        btn_row = tk.Frame(win, bg=COLOR_PANEL)
+        btn_row.pack(pady=16)
+        HoverButton(
+            btn_row, text="  Kích hoạt  ", command=_do_activate,
+            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 11, "bold"),
+            padx=22, pady=10,
+        ).pack(side="left", padx=6)
+
+        def _open_buy():
+            import webbrowser
+            url = (server_var.get() or DEFAULT_LICENSE_SERVER).rstrip("/")
+            webbrowser.open(url)
+
+        HoverButton(
+            btn_row, text="  Mua token  ", command=_open_buy,
+            bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
+            font=("Segoe UI", 11, "bold"), padx=16, pady=10,
+        ).pack(side="left", padx=6)
+
+        # Không cho đóng nếu chưa license — vẫn cho tắt app
+        def _on_close_lic():
+            if not self._license_ok:
+                if messagebox.askyesno(
+                    "Thoát?",
+                    "Chưa kích hoạt bản quyền. Bạn muốn thoát app?",
+                    parent=win,
+                ):
+                    win.destroy()
+                    self.destroy()
+            else:
+                win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close_lic)
 
     def _bootstrap_saved_data(self):
         """Load cookies / nhóm / nháp sau khi UI đã hiện."""
+        if not getattr(self, "_license_ok", False):
+            return
         def _bg():
             cookies_ok = False
             if COOKIES_FILE.exists():
@@ -3812,6 +3969,20 @@ class App(tk.Tk):
         self.update_idletasks()
 
     def _start_posting(self):
+        if not getattr(self, "_license_ok", False):
+            messagebox.showwarning(
+                "Chưa bản quyền",
+                "Vui lòng kích hoạt token trước khi đăng bài.",
+            )
+            self._show_license_dialog()
+            return
+        if lic:
+            ok, msg, _ = lic.verify(timeout=8.0)
+            if not ok:
+                self._license_ok = False
+                messagebox.showerror("License", msg)
+                self._show_license_dialog()
+                return
         if not self.backend.logged_in:
             messagebox.showwarning("Chưa đăng nhập", "Vui lòng đăng nhập trước.")
             return
@@ -4083,6 +4254,68 @@ class App(tk.Tk):
         outer = tk.Frame(tab, bg=COLOR_BG)
         outer.pack(expand=True, fill="both", padx=40, pady=20)
 
+        # ── Bản quyền / Token ─────────────────────────────────────────────
+        lic_card = tk.LabelFrame(
+            outer, text="  Bản quyền (Token)  ",
+            bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 11, "bold"),
+            bd=1, relief="groove", padx=16, pady=12,
+        )
+        lic_card.pack(fill="x", pady=(0, 16))
+
+        self._license_status_var = tk.StringVar(
+            value=(lic.status_summary() if lic else "Thiếu license_client")
+        )
+        tk.Label(
+            lic_card, textvariable=self._license_status_var,
+            bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10, "bold"),
+            wraplength=520, justify="left",
+        ).pack(anchor="w")
+
+        tk.Label(
+            lic_card,
+            text=(
+                "Mỗi token = 1 máy. Server lưu IP khi kích hoạt / dùng.\n"
+                "Hết hạn theo gói (ngày/tháng) — mua thêm token để gia hạn."
+            ),
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
+            justify="left",
+        ).pack(anchor="w", pady=(6, 8))
+
+        row = tk.Frame(lic_card, bg=COLOR_PANEL)
+        row.pack(fill="x")
+        self._lic_token_var = tk.StringVar()
+        SoftEntry(row, textvariable=self._lic_token_var, width=28).pack(
+            side="left", padx=(0, 8)
+        )
+        HoverButton(
+            row, text="Kích hoạt", command=self._activate_license_ui,
+            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 10, "bold"),
+            padx=12, pady=6,
+        ).pack(side="left")
+        HoverButton(
+            row, text="Kiểm tra lại", command=self._recheck_license_ui,
+            bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
+            font=("Segoe UI", 10, "bold"), padx=10, pady=6,
+        ).pack(side="left", padx=6)
+
+        srv_row = tk.Frame(lic_card, bg=COLOR_PANEL)
+        srv_row.pack(fill="x", pady=(10, 0))
+        tk.Label(
+            srv_row, text="Server:", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        self._lic_server_var = tk.StringVar(
+            value=(lic.get_server_url() if lic else DEFAULT_LICENSE_SERVER)
+        )
+        SoftEntry(srv_row, textvariable=self._lic_server_var, width=36).pack(
+            side="left", padx=8
+        )
+        HoverButton(
+            srv_row, text="Lưu URL", command=self._save_license_server_ui,
+            bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
+            font=("Segoe UI", 9, "bold"), padx=10, pady=5,
+        ).pack(side="left")
+
         # ── Kiểm tra kết nối ──────────────────────────────────────────────
         net_card = tk.LabelFrame(
             outer, text="  Kết nối mạng  ",
@@ -4218,7 +4451,71 @@ class App(tk.Tk):
             tk.Label(hint_card, text=h, bg=COLOR_PANEL, fg=color,
                      font=("Segoe UI", 9), anchor="w", justify="left").pack(anchor="w")
 
+    def _save_license_server_ui(self):
+        if not lic:
+            return
+        url = self._lic_server_var.get().strip()
+        if not url:
+            messagebox.showwarning("Thiếu URL", "Nhập địa chỉ server license.")
+            return
+        lic.set_server_url(url)
+        messagebox.showinfo("Đã lưu", f"Server license:\n{url}")
+
+    def _activate_license_ui(self):
+        if not lic:
+            messagebox.showerror("Lỗi", "Thiếu license_client.py")
+            return
+        tok = self._lic_token_var.get().strip()
+        if not tok:
+            messagebox.showwarning("Thiếu token", "Dán mã FBP-… vào ô.")
+            return
+        url = self._lic_server_var.get().strip()
+        if url:
+            lic.set_server_url(url)
+
+        def _worker():
+            ok, msg, data = lic.activate(tok)
+            def _done():
+                if ok:
+                    self._license_ok = True
+                    self._license_status_var.set(f"✅ {msg}")
+                    days = data.get("expires_at", "")
+                    messagebox.showinfo(
+                        "Kích hoạt OK",
+                        f"{msg}\nHết hạn: {days}\nMáy đã bị khoá với token này.",
+                    )
+                    if not getattr(self, "_bootstrapped_data", False):
+                        self._bootstrap_saved_data()
+                else:
+                    messagebox.showerror("Kích hoạt thất bại", msg)
+                    self._license_status_var.set(f"❌ {msg}")
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _recheck_license_ui(self):
+        if not lic:
+            return
+        url = self._lic_server_var.get().strip()
+        if url:
+            lic.set_server_url(url)
+
+        def _worker():
+            ok, msg, data = lic.verify()
+            def _done():
+                self._license_ok = ok
+                self._license_status_var.set(("✅ " if ok else "❌ ") + msg)
+                if ok:
+                    messagebox.showinfo("License", msg)
+                else:
+                    messagebox.showerror("License", msg)
+                    self._show_license_dialog()
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _save_all_now(self):
+        self._bootstrapped_data = True
         try:
             _ensure_data_dir()
             if self.backend.logged_in:
