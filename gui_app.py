@@ -23,7 +23,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -753,19 +753,21 @@ class FacebookBackend:
                 except Exception:
                     pass
 
-        # Token mới mỗi nhóm — tránh tái dùng session sau bài đầu
         self._tokens_cache.clear()
         self._tokens_cache_time = 0.0
 
         marker = self._extract_verify_marker(message)
         if not marker:
             marker = uuid.uuid4().hex[:6]
-            message = f"{message.rstrip()}\n\n#{marker}"
+            message = f"{message.rstrip()}\n\n[FPV-{marker}]"
 
-        # Baseline: marker chưa được phép có trên nhóm trước khi đăng
-        if self._marker_visible_on_group(group_id, marker):
-            _prog(f"Mã #{marker} đã có sẵn trên nhóm — đổi mã và thử lại")
-            return "failed", f"Mã xác minh #{marker} đã tồn tại trên nhóm (trùng)"
+        token = f"[FPV-{marker}]"
+        # Snapshot trước khi đăng (mbasic) — marker chưa được phép có
+        before_pending = self._fetch_verify_html(group_id, kind="pending")
+        before_feed = self._fetch_verify_html(group_id, kind="feed")
+        if token.lower() in (before_pending or "").lower() or token.lower() in (before_feed or "").lower():
+            _prog(f"Mã {token} đã có sẵn trên nhóm — tạo mã mới")
+            return "failed", f"Mã xác minh {token} đã tồn tại trên nhóm"
 
         methods = [
             ("GraphQL", self._post_via_graphql),
@@ -774,7 +776,6 @@ class FacebookBackend:
             ("m.facebook", self._post_via_m_composer),
             ("Ajax", self._post_via_ajax_feed),
         ]
-        # Sau bài đầu: ưu tiên mbasic (GraphQL hay echo/chặn spam)
         if self._used_post_ids:
             methods = [
                 ("mbasic", self._post_via_mobile),
@@ -783,6 +784,7 @@ class FacebookBackend:
                 ("GraphQL", self._post_via_graphql),
                 ("Ajax", self._post_via_ajax_feed),
             ]
+
         last_err = "Không thể đăng bài"
         for name, method in methods:
             _prog(f"Thử {name}…")
@@ -796,7 +798,7 @@ class FacebookBackend:
                 _prog(f"{name}: {last_err}")
                 continue
 
-            _prog(f"{name} báo {status} → xác minh mã #{marker} trên nhóm…")
+            _prog(f"{name} báo {status} → xác minh {token} trên mbasic…")
             post_id = None
             m = re.search(
                 r"(?:post[:\s]*|Đăng[^(]*\()([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})",
@@ -809,7 +811,7 @@ class FacebookBackend:
             if post_id and (
                 str(post_id) == str(group_id) or str(post_id) in self._used_post_ids
             ):
-                _prog(f"{name}: post_id trùng/đã dùng ({str(post_id)[:20]}) → bỏ qua")
+                _prog(f"{name}: post_id trùng/đã dùng → bỏ qua")
                 last_err = f"{name} trả post_id cũ — FB có thể chặn spam"
                 continue
 
@@ -821,6 +823,8 @@ class FacebookBackend:
                     post_id=post_id,
                     claimed=status,
                     marker=marker,
+                    before_pending=before_pending,
+                    before_feed=before_feed,
                 )
             except Exception as exc:
                 _prog(f"Xác minh lỗi: {exc}")
@@ -835,9 +839,9 @@ class FacebookBackend:
                     if verified == "published"
                     else "Đang chờ admin duyệt"
                 )
-                extra = f" (#{marker}, đã xác minh)"
+                extra = f" ({token}, đã xác minh)"
                 if post_id:
-                    extra = f" (post: {post_id[:24]}, #{marker})"
+                    extra = f" (post: {post_id[:24]}, {token})"
                 _prog(f"{name}: {label}{extra}")
                 try:
                     self.save_tokens()
@@ -846,7 +850,7 @@ class FacebookBackend:
                 return verified, f"{label}{extra}"
 
             last_err = (
-                f"{name} báo OK nhưng KHÔNG thấy mã #{marker} trên nhóm/hàng chờ"
+                f"{name} báo OK nhưng KHÔNG thấy {token} trên bài/hàng chờ mbasic"
                 + (f" — {msg}" if msg else "")
             )
             _prog(f"⚠ {last_err}")
@@ -855,55 +859,70 @@ class FacebookBackend:
 
     @staticmethod
     def _extract_verify_marker(message: str) -> str | None:
-        m = re.search(r"(?m)^#([a-f0-9]{6})\s*$", message or "")
+        m = re.search(r"\[FPV-([a-z0-9]{6})\]", message or "", re.I)
         if m:
             return m.group(1).lower()
-        m = re.search(r"#([a-f0-9]{6})\b", message or "")
-        return m.group(1).lower() if m else None
+        # tương thích bản cũ #hex (không dùng để xác minh mới)
+        return None
 
-    def _marker_visible_on_group(self, group_id: str, marker: str) -> bool:
-        """True nếu đã thấy #marker trên feed/pending của đúng nhóm."""
-        if not marker:
-            return False
-        needle = f"#{marker.lower()}"
+    @staticmethod
+    def _strip_non_content_html(html: str) -> str:
+        """Bỏ script/style/textarea/input — tránh khớp nhầm ô soạn bài / CSS."""
+        if not html:
+            return ""
+        out = re.sub(r"<script\b[^>]*>.*?</script>", " ", html, flags=re.I | re.S)
+        out = re.sub(r"<style\b[^>]*>.*?</style>", " ", out, flags=re.I | re.S)
+        out = re.sub(r"<textarea\b[^>]*>.*?</textarea>", " ", out, flags=re.I | re.S)
+        out = re.sub(r"<input\b[^>]*>", " ", out, flags=re.I)
+        out = re.sub(r"<select\b[^>]*>.*?</select>", " ", out, flags=re.I | re.S)
+        # Bỏ attribute style="color:#xxxxxx" còn sót
+        out = re.sub(r'style\s*=\s*"[^"]*"', " ", out, flags=re.I)
+        out = re.sub(r"style\s*=\s*'[^']*'", " ", out, flags=re.I)
+        return out
+
+    def _fetch_verify_html(self, group_id: str, kind: str = "pending") -> str:
+        """Lấy HTML mbasic đã làm sạch để xác minh."""
+        gid = str(group_id)
+        if kind == "pending":
+            urls = [
+                f"https://mbasic.facebook.com/groups/{gid}/pending",
+                f"https://mbasic.facebook.com/groups/{gid}?view=pending",
+            ]
+        else:
+            urls = [
+                f"https://mbasic.facebook.com/groups/{gid}",
+                f"https://mbasic.facebook.com/groups/{gid}/?refid=18",
+            ]
         self._use_desktop_session()
-        urls = [
-            f"https://mbasic.facebook.com/groups/{group_id}/pending",
-            f"https://mbasic.facebook.com/groups/{group_id}",
-            f"https://m.facebook.com/groups/{group_id}/pending",
-            f"https://m.facebook.com/groups/{group_id}",
-        ]
-        for url in urls:
-            try:
-                resp = self.session.get(url, timeout=12, allow_redirects=True)
-                if resp.status_code >= 400:
+        # mbasic cần mobile UA
+        saved = dict(self.session.headers)
+        try:
+            self._use_mobile_session()
+            for url in urls:
+                try:
+                    resp = self.session.get(url, timeout=12, allow_redirects=True)
+                    if resp.status_code >= 400:
+                        continue
+                    final = resp.url.lower()
+                    if "login" in final:
+                        continue
+                    if f"/groups/{gid}" not in final:
+                        continue
+                    return self._strip_non_content_html(resp.text)
+                except Exception:
                     continue
-                final = resp.url.lower()
-                if "login" in final:
-                    continue
-                if f"/groups/{group_id}" not in final and f"groups/{group_id}" not in resp.text:
-                    continue
-                if needle in resp.text.lower():
-                    return True
-            except Exception:
-                continue
-        return False
+        finally:
+            self.session.headers.clear()
+            self.session.headers.update(saved)
+            if self._desktop_mode:
+                self._use_desktop_session()
+        return ""
 
-    def _message_snippets(self, message: str) -> list[str]:
-        """Đoạn text dùng để khớp bài — ưu tiên mã #xxxxxx."""
-        raw = message or ""
-        checks: list[str] = []
-        marker = self._extract_verify_marker(raw)
-        if marker:
-            checks.append(f"#{marker}")
-        for line in raw.split("\n"):
-            line = re.sub(r"\s+", " ", line).strip()
-            if line.startswith("#") and len(line) <= 12:
-                continue
-            if len(line) >= 16 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
-                checks.append(line[:48].lower())
-                break
-        return list(dict.fromkeys(c for c in checks if c))
+    def _marker_in_html(self, html: str, marker: str) -> bool:
+        if not html or not marker:
+            return False
+        token = f"[fpv-{marker.lower()}]"
+        return token in html.lower()
 
     def _verify_post_status(
         self,
@@ -912,95 +931,95 @@ class FacebookBackend:
         post_id: str | None = None,
         claimed: str | None = None,
         marker: str | None = None,
+        before_pending: str | None = None,
+        before_feed: str | None = None,
     ) -> str | None:
         """
-        Chỉ OK khi thấy mã #marker trên đúng nhóm (pending hoặc feed).
-        Không bao giờ tin post_id một mình.
+        Chỉ OK khi [FPV-xxx] xuất hiện MỚI trên mbasic pending/feed
+        (so với snapshot trước khi đăng). Không tin post_id / CSS #hex.
         """
         marker = (marker or self._extract_verify_marker(message) or "").lower()
         if not marker:
             return None
-        self._use_desktop_session()
+        token = f"[FPV-{marker}]"
 
-        for attempt in range(4):
+        for attempt in range(5):
             if attempt:
-                time.sleep(2.0)
+                time.sleep(2.2)
             else:
-                time.sleep(1.2)
-            found = self._verify_once(
-                group_id, marker=marker, post_id=post_id, claimed=claimed
-            )
-            if found:
-                return found
+                time.sleep(1.5)
+
+            # 1) Permalink mbasic theo post_id (nếu có) — phải có marker
+            if post_id and str(post_id).isdigit():
+                story = self._fetch_story_html(group_id, post_id)
+                if story and self._marker_in_html(story, marker):
+                    if claimed == "pending" or "pending" in story.lower()[:3000]:
+                        return "pending"
+                    return "published"
+
+            # 2) Pending mbasic — marker mới so với before
+            pending = self._fetch_verify_html(group_id, kind="pending")
+            if self._marker_in_html(pending, marker):
+                if before_pending and self._marker_in_html(before_pending, marker):
+                    pass  # đã có từ trước → không tính
+                else:
+                    return "pending"
+
+            # 3) Feed mbasic — marker mới
+            feed = self._fetch_verify_html(group_id, kind="feed")
+            if self._marker_in_html(feed, marker):
+                if before_feed and self._marker_in_html(before_feed, marker):
+                    pass
+                else:
+                    return "published" if claimed != "pending" else "pending"
+
         return None
 
-    def _verify_once(
-        self,
-        group_id: str,
-        marker: str,
-        post_id: str | None = None,
-        claimed: str | None = None,
-    ) -> str | None:
-        needle = f"#{marker.lower()}"
+    def _fetch_story_html(self, group_id: str, post_id: str) -> str:
         gid = str(group_id)
-        urls: list[tuple[str, str]] = [
-            ("pending", f"https://mbasic.facebook.com/groups/{gid}/pending"),
-            ("pending", f"https://m.facebook.com/groups/{gid}/pending"),
-            ("feed", f"https://mbasic.facebook.com/groups/{gid}"),
-            ("feed", f"https://m.facebook.com/groups/{gid}"),
-            ("pending", f"https://www.facebook.com/groups/{gid}/pending_posts"),
-            ("feed", f"https://www.facebook.com/groups/{gid}"),
+        pid = str(post_id)
+        urls = [
+            f"https://mbasic.facebook.com/story.php?story_fbid={pid}&id={gid}",
+            f"https://mbasic.facebook.com/groups/{gid}/permalink/{pid}/",
         ]
-        if post_id and str(post_id).isdigit():
-            urls[0:0] = [
-                ("by_id", f"https://mbasic.facebook.com/story.php?story_fbid={post_id}&id={gid}"),
-                ("by_id", f"https://m.facebook.com/story.php?story_fbid={post_id}&id={gid}"),
-                ("by_id", f"https://www.facebook.com/groups/{gid}/posts/{post_id}"),
-            ]
-
-        for kind, url in urls:
-            try:
-                resp = self.session.get(url, timeout=12, allow_redirects=True)
-                if resp.status_code >= 400:
+        saved = dict(self.session.headers)
+        try:
+            self._use_mobile_session()
+            for url in urls:
+                try:
+                    resp = self.session.get(url, timeout=12, allow_redirects=True)
+                    if resp.status_code >= 400:
+                        continue
+                    final = resp.url.lower()
+                    low = resp.text.lower()
+                    if "login" in final:
+                        continue
+                    if any(
+                        x in low[:2500]
+                        for x in (
+                            "content isn't available",
+                            "nội dung không",
+                            "this content isn't available",
+                            "không khả dụng",
+                        )
+                    ):
+                        continue
+                    # Phải còn gắn với group hoặc story_fbid
+                    if (
+                        f"/groups/{gid}" not in final
+                        and f"id={gid}" not in final
+                        and f"story_fbid={pid}" not in final
+                    ):
+                        continue
+                    return self._strip_non_content_html(resp.text)
+                except Exception:
                     continue
-                html = resp.text
-                low = html.lower()
-                final = resp.url.lower()
-
-                if "login" in final:
-                    continue
-                if any(
-                    x in low[:2500]
-                    for x in (
-                        "content isn't available",
-                        "nội dung không",
-                        "this content isn't available",
-                        "không khả dụng",
-                    )
-                ):
-                    continue
-
-                on_this_group = (
-                    f"/groups/{gid}" in final
-                    or f"id={gid}" in final
-                )
-                if not on_this_group:
-                    continue
-
-                # BẮT BUỘC thấy mã xác minh riêng của lần đăng này
-                if needle not in low:
-                    continue
-
-                if kind == "pending" or "pending" in final:
-                    return "pending"
-                if claimed == "pending":
-                    return "pending"
-                if kind == "by_id" and post_id and str(post_id) in html:
-                    return "pending" if "pending" in low[:4000] else "published"
-                return "published"
-            except Exception:
-                continue
-        return None
+        finally:
+            self.session.headers.clear()
+            self.session.headers.update(saved)
+            if self._desktop_mode:
+                self._use_desktop_session()
+        return ""
 
     def _upload_photo(self, image_path: str, tokens: dict) -> str | None:
         """Upload ảnh, trả về photo_id nếu thành công."""
@@ -2755,7 +2774,7 @@ class App(tk.Tk):
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(
             left,
-            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  — mỗi nhóm gắn mã #xxxxxx để xác minh thật",
+            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  — mỗi nhóm gắn [FPV-xxxxxx], xác minh trên mbasic",
             bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10),
         ).pack(anchor="w", pady=(4, 12))
 
@@ -2914,14 +2933,13 @@ class App(tk.Tk):
 
     def _unique_message(self, message: str, group_id: str, index: int = 1) -> str:
         """
-        Gắn mã #xxxxxx riêng mỗi nhóm (hiển thị được).
-        Dùng để xác minh thật + giảm FB chặn bài trùng.
+        Gắn mã [FPV-xxxxxx] riêng mỗi nhóm.
+        Dùng xác minh thật (không dùng #hex — dễ trùng màu CSS).
         """
-        # Bỏ marker cũ nếu có
-        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", message or "").rstrip()
+        base = re.sub(r"(?m)\n*\[FPV-[a-z0-9]{6}\]\s*$", "", message or "", flags=re.I)
+        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", base, flags=re.I).rstrip()
         code = uuid.uuid4().hex[:6]
-        # Thêm biến thể nhẹ theo thứ tự nhóm
-        return f"{base}\n\n#{code}"
+        return f"{base}\n\n[FPV-{code}]"
 
     def _get_selected_groups(self) -> list[dict]:
         return [g for var, g in self._group_vars if var.get()]
@@ -2988,7 +3006,7 @@ class App(tk.Tk):
         self._tick_timer()
 
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
-        self._live("Mỗi nhóm có mã #xxxxxx — chỉ báo OK khi thấy mã trên đúng nhóm", "info")
+        self._live("Mỗi nhóm có mã [FPV-xxxxxx] — chỉ OK khi thấy mã trên mbasic pending/feed", "info")
         self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
@@ -3016,7 +3034,7 @@ class App(tk.Tk):
                 self.after(
                     0,
                     lambda: self._live(
-                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (mã #{marker})…", "info"
+                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (mã [FPV-{marker}])…", "info"
                     ),
                 )
 
