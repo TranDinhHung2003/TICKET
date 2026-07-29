@@ -2667,6 +2667,8 @@ class App(tk.Tk):
         self._stop_flag = False
         self._draft_save_job = None
         self._license_ok = False
+        self._license_dialog = None
+        self._license_watch_job = None
 
         # UI trước — mở nhanh; cookies/nhóm/nháp load nền
         self._build_ui()
@@ -2681,13 +2683,14 @@ class App(tk.Tk):
                     False, "Thiếu module license_client.py"
                 ))
                 return
-            ok, msg, _data = lic.verify()
-            self.after(0, lambda: self._on_license_result(ok, msg))
+            ok, msg, data = lic.verify()
+            self.after(0, lambda: self._on_license_result(ok, msg, data))
 
         threading.Thread(target=_bg, daemon=True).start()
 
-    def _on_license_result(self, ok: bool, msg: str):
+    def _on_license_result(self, ok: bool, msg: str, data: dict | None = None):
         self._license_ok = bool(ok)
+        data = data or {}
         if hasattr(self, "_license_status_var"):
             self._license_status_var.set(
                 ("✅ " if ok else "❌ ") + (msg or "")
@@ -2697,34 +2700,104 @@ class App(tk.Tk):
             self._log(f"Bản quyền: {msg}", "ok")
             self._bootstrapped_data = True
             self._bootstrap_saved_data()
+            self._schedule_license_watch()
         else:
-            self._status_var.set("🔑 Chưa kích hoạt bản quyền")
+            self._status_var.set("🔑 Cần mua token để sử dụng tiếp")
             self._log(f"Bản quyền: {msg}", "warn")
-            self.after(200, self._show_license_dialog)
+            # Hết hạn giữa chừng → dừng đăng bài
+            if getattr(self, "_posting", False):
+                self._stop_flag = True
+            reason = "expired" if (data.get("code") == "expired") else "missing"
+            self.after(200, lambda: self._show_license_dialog(reason=reason))
 
-    def _show_license_dialog(self):
-        """Hộp thoại bắt buộc nhập token."""
-        if getattr(self, "_license_ok", False):
+    def _schedule_license_watch(self):
+        """Kiểm tra hạn token định kỳ (mỗi 15 giây)."""
+        if self._license_watch_job:
+            try:
+                self.after_cancel(self._license_watch_job)
+            except Exception:
+                pass
+            self._license_watch_job = None
+
+        def _tick():
+            self._license_watch_job = self.after(15000, _tick)
+            if not lic or not getattr(self, "_license_ok", False):
+                return
+            # Kiểm tra hết hạn local ngay (không chờ server)
+            if lic.is_locally_expired():
+                self._on_license_result(
+                    False,
+                    getattr(lic, "MSG_NEED_BUY", "Token đã hết hạn. Bạn cần mua token để sử dụng tiếp."),
+                    {"code": "expired"},
+                )
+                return
+
+            def _bg():
+                ok, msg, data = lic.verify(timeout=8.0)
+                if not ok:
+                    self.after(0, lambda: self._on_license_result(ok, msg, data))
+                else:
+                    self.after(0, lambda: self._refresh_license_status_ok(msg))
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        self._license_watch_job = self.after(15000, _tick)
+
+    def _refresh_license_status_ok(self, msg: str):
+        if not getattr(self, "_license_ok", False):
             return
+        self._status_var.set(f"🔑 {msg}")
+        if hasattr(self, "_license_status_var"):
+            self._license_status_var.set(f"✅ {msg}")
+
+    def _show_license_dialog(self, reason: str = "missing"):
+        """Hộp thoại bắt buộc nhập token — hiện lại khi hết hạn."""
+        # Đã có dialog đang mở
+        existing = getattr(self, "_license_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+
+        if getattr(self, "_license_ok", False) and reason != "expired":
+            return
+
+        # Hết hạn → buộc hiện lại dù trước đó ok
+        self._license_ok = False
+
         win = tk.Toplevel(self)
+        self._license_dialog = win
         win.title("Kích hoạt bản quyền")
         win.configure(bg=COLOR_PANEL)
-        win.geometry("480x360")
+        win.geometry("500x400")
         win.transient(self)
         win.grab_set()
         win.resizable(False, False)
 
+        title = "🔑  Nhập mã token để sử dụng app"
+        hint = (
+            "Mua token trên trang web / liên hệ admin.\n"
+            "Mỗi token chỉ kích hoạt được 1 máy."
+        )
+        if reason == "expired":
+            title = "⏰  Token đã hết hạn"
+            hint = (
+                "Bạn cần mua token để sử dụng tiếp.\n"
+                "Liên hệ admin / mở trang mua token để nhận mã mới."
+            )
+
         tk.Label(
-            win, text="🔑  Nhập mã token để sử dụng app",
+            win, text=title,
             bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 14, "bold"),
         ).pack(pady=(22, 6), padx=20, anchor="w")
         tk.Label(
-            win,
-            text=(
-                "Mua token trên trang web / liên hệ admin.\n"
-                "Mỗi token chỉ kích hoạt được 1 máy. Hết hạn theo gói tháng."
-            ),
-            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 10),
+            win, text=hint,
+            bg=COLOR_PANEL, fg=COLOR_ERROR if reason == "expired" else COLOR_TEXT_DIM,
+            font=("Segoe UI", 10, "bold" if reason == "expired" else "normal"),
             justify="left",
         ).pack(padx=20, anchor="w")
 
@@ -2745,8 +2818,10 @@ class App(tk.Tk):
         )
 
         status = tk.Label(
-            win, text="", bg=COLOR_PANEL, fg=COLOR_ERROR,
-            font=("Segoe UI", 9), wraplength=420, justify="left",
+            win,
+            text=("Bạn cần mua token để sử dụng tiếp." if reason == "expired" else ""),
+            bg=COLOR_PANEL, fg=COLOR_ERROR,
+            font=("Segoe UI", 9), wraplength=440, justify="left",
         )
         status.pack(padx=20, anchor="w")
 
@@ -2773,8 +2848,10 @@ class App(tk.Tk):
                         if hasattr(self, "_license_status_var"):
                             self._license_status_var.set(f"✅ {msg}")
                         self._log(f"Kích hoạt OK: {msg}", "ok")
+                        self._license_dialog = None
                         win.after(400, win.destroy)
                         self._bootstrap_saved_data()
+                        self._schedule_license_watch()
                     else:
                         status.config(text=f"❌ {msg}", fg=COLOR_ERROR)
                 self.after(0, _done)
@@ -2800,17 +2877,18 @@ class App(tk.Tk):
             font=("Segoe UI", 11, "bold"), padx=16, pady=10,
         ).pack(side="left", padx=6)
 
-        # Không cho đóng nếu chưa license — vẫn cho tắt app
         def _on_close_lic():
             if not self._license_ok:
                 if messagebox.askyesno(
                     "Thoát?",
-                    "Chưa kích hoạt bản quyền. Bạn muốn thoát app?",
+                    "Chưa có token hợp lệ. Bạn muốn thoát app?",
                     parent=win,
                 ):
+                    self._license_dialog = None
                     win.destroy()
                     self.destroy()
             else:
+                self._license_dialog = None
                 win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _on_close_lic)

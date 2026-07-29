@@ -11,6 +11,7 @@ import platform
 import socket
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -24,8 +25,12 @@ DATA_DIR = Path.home() / ".fb_poster"
 LICENSE_FILE = DATA_DIR / "license.json"
 CONFIG_FILE = DATA_DIR / "license_config.json"
 
-# Offline chỉ khi MẤT MẠNG — và rất ngắn (sau revoke/reset phải online)
 OFFLINE_GRACE_HOURS = float(os.environ.get("FB_LICENSE_OFFLINE_HOURS", "6"))
+
+MSG_NEED_BUY = (
+    "Token đã hết hạn hoặc chưa kích hoạt.\n"
+    "Bạn cần mua token để sử dụng tiếp."
+)
 
 
 def _ensure_dir():
@@ -58,10 +63,6 @@ def set_server_url(url: str) -> None:
 
 
 def get_machine_id() -> str:
-    """
-    Mã máy ổn định (không dùng IP làm khoá chính — IP hay đổi).
-    Hash SHA256 các thành phần phần cứng / OS.
-    """
     parts = [
         platform.system(),
         platform.machine(),
@@ -122,6 +123,8 @@ def save_local_license(data: dict) -> None:
         "activated_at": data.get("activated_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "last_verify_at": time.time(),
         "server_url": get_server_url(),
+        "days_left": data.get("days_left"),
+        "seconds_left": data.get("seconds_left"),
     }
     LICENSE_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -136,8 +139,31 @@ def clear_local_license() -> None:
         pass
 
 
+def _parse_expires_at(value: str | None):
+    if not value:
+        return None
+    try:
+        s = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def is_locally_expired(local: dict | None = None) -> bool:
+    """True nếu expires_at trên máy đã qua — chặn ngay không cần server."""
+    local = local if local is not None else load_local_license()
+    if not local:
+        return True
+    exp = _parse_expires_at(local.get("expires_at"))
+    if not exp:
+        return False
+    return datetime.now(timezone.utc) >= exp
+
+
 def activate(token: str, timeout: float = 15.0) -> tuple[bool, str, dict]:
-    """Kích hoạt token trên máy này."""
     token = (token or "").strip().upper()
     if not token.startswith("FBP-"):
         return False, "Token không đúng định dạng (FBP-XXXX-…)", {}
@@ -165,11 +191,13 @@ def activate(token: str, timeout: float = 15.0) -> tuple[bool, str, dict]:
         return False, f"Lỗi kích hoạt: {exc}", {}
 
     if not data.get("ok"):
-        # Thu hồi / chặn máy → xoá cache local
         code = data.get("code") or ""
         if code in ("revoked", "expired", "machine_blocked", "bound_other"):
             clear_local_license()
-        return False, data.get("error") or f"HTTP {r.status_code}", data
+        err = data.get("error") or f"HTTP {r.status_code}"
+        if code == "expired":
+            err = MSG_NEED_BUY
+        return False, err, data
 
     save_local_license({
         "token": data.get("token") or token,
@@ -186,21 +214,25 @@ def verify(
 ) -> tuple[bool, str, dict]:
     """
     Xác minh token còn hạn + đúng máy.
-    - Server trả lỗi (revoked/reset/…) → XOÁ license local ngay.
-    - Không tự activate lại (tránh máy cũ sau reset tự vào lại).
-    - Offline chỉ khi mất mạng và trong thời gian grace ngắn.
+    Hết hạn local → chặn ngay + xoá cache.
     """
     if allow_offline_hours is None:
         allow_offline_hours = OFFLINE_GRACE_HOURS
 
     local = load_local_license()
     if not local:
-        return False, "Chưa kích hoạt bản quyền — nhập token để tiếp tục", {}
+        return False, MSG_NEED_BUY, {"code": "missing"}
 
     mid = get_machine_id()
     if local.get("machine_id") and local["machine_id"] != mid:
         clear_local_license()
-        return False, "License không khớp máy này — đã xoá bản quyền local", {}
+        return False, "License không khớp máy này — đã xoá bản quyền local", {
+            "code": "machine_mismatch"
+        }
+
+    if is_locally_expired(local):
+        clear_local_license()
+        return False, MSG_NEED_BUY, {"code": "expired"}
 
     url = get_server_url() + "/api/v1/verify"
     try:
@@ -211,6 +243,9 @@ def verify(
         )
         data = r.json() if r.content else {}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+        if is_locally_expired(local):
+            clear_local_license()
+            return False, MSG_NEED_BUY, {"code": "expired"}
         last = float(local.get("last_verify_at") or 0)
         age_h = (time.time() - last) / 3600 if last else 9999
         if last and age_h <= allow_offline_hours:
@@ -222,18 +257,24 @@ def verify(
     except Exception as exc:
         return False, f"Lỗi xác minh: {exc}", local
 
-    # Server đã trả lời — không dùng offline cache khi bị từ chối
     if not data.get("ok"):
         code = data.get("code") or ""
-        err = data.get("error") or "License không hợp lệ"
-        # Mọi từ chối từ server → xoá local (revoked / reset / hết hạn / sai máy)
         clear_local_license()
+        if code == "expired":
+            return False, MSG_NEED_BUY, data
         if code == "need_activate" or data.get("need_activate"):
             return False, (
                 "Token đã bị gỡ máy / chưa gắn máy.\n"
                 "Nhập lại token trên máy ĐƯỢC PHÉP (máy mới sau reset)."
             ), data
-        return False, err, data
+        if code == "revoked":
+            return False, MSG_NEED_BUY + "\n(Token đã bị thu hồi)", data
+        return False, data.get("error") or MSG_NEED_BUY, data
+
+    sec = data.get("seconds_left")
+    if sec is not None and int(sec) <= 0:
+        clear_local_license()
+        return False, MSG_NEED_BUY, {**data, "code": "expired"}
 
     local["expires_at"] = data.get("expires_at") or local.get("expires_at")
     local["duration_label"] = data.get("duration_label") or local.get("duration_label")
@@ -241,15 +282,13 @@ def verify(
     local["days_left"] = data.get("days_left")
     local["seconds_left"] = data.get("seconds_left")
     save_local_license(local)
+
     sec = data.get("seconds_left")
     days = data.get("days_left")
     if sec is not None and sec < 86400:
         m, s = divmod(int(sec), 60)
         h, m = divmod(m, 60)
-        if h:
-            extra = f" — còn ~{h}h{m:02d}p"
-        else:
-            extra = f" — còn ~{m} phút {s}s"
+        extra = f" — còn ~{h}h{m:02d}p" if h else f" — còn ~{m} phút {s}s"
     elif days is not None:
         extra = f" — còn ~{days} ngày"
     else:
@@ -260,9 +299,14 @@ def verify(
 def status_summary() -> str:
     local = load_local_license()
     if not local:
-        return "Chưa kích hoạt"
+        return "Chưa kích hoạt — cần mua token"
+    if is_locally_expired(local):
+        return "Token đã hết hạn — cần mua token mới"
     exp = local.get("expires_at") or "?"
+    sec = local.get("seconds_left")
     days = local.get("days_left")
+    if sec is not None and int(sec) < 86400:
+        return f"Token …{local['token'][-4:]} | còn ~{int(sec)}s | hết {exp}"
     if days is not None:
         return f"Token …{local['token'][-4:]} | hết {exp[:10]} | còn ~{days} ngày"
-    return f"Token …{local['token'][-4:]} | hết hạn {exp[:10]}"
+    return f"Token …{local['token'][-4:]} | hết hạn {exp}"
