@@ -1489,8 +1489,8 @@ class FacebookBackend:
                         st, msg = result
                         if st == "failed":
                             return result
-                        if ph is None and "(chỉ text)" not in msg:
-                            msg = f"{msg} (chỉ text)" if ph is None else msg
+                        if ph is None:
+                            msg = f"{msg} (chỉ text)"
                         return st, msg
                     time.sleep(0.4)
 
