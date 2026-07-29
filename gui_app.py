@@ -937,10 +937,13 @@ class FacebookBackend:
                 return True, msg
             if self._post_ok(post_resp.text):
                 return True, "Đã gửi bài"
-            if post_resp.status_code in (200, 302) and "login" not in post_resp.url.lower():
-                if "error" not in post_resp.text[:600].lower():
-                    return True, "Đã gửi — có thể chờ admin duyệt"
-            return False, "m.facebook.com: không xác nhận"
+            # Chỉ coi là pending nếu có dấu hiệu rõ trong HTML
+            if any(k in post_resp.text.lower() for k in (
+                "pending", "chờ duyệt", "chờ phê duyệt", "awaiting approval",
+                "your post has been submitted", "bài viết của bạn đã được gửi",
+            )):
+                return True, "Đã gửi — chờ admin duyệt"
+            return False, "m.facebook.com: không xác nhận được bài đăng"
         except Exception as exc:
             return False, f"m.facebook: {exc}"
         finally:
@@ -1083,10 +1086,12 @@ class FacebookBackend:
             if ok:
                 return True, msg
             if self._post_ok(post_resp.text):
-                return True, "Đã gửi — có thể chờ admin duyệt"
-            if post_resp.status_code in (200, 302) and "login" not in post_resp.url.lower():
-                if "error" not in post_resp.text[:800].lower():
-                    return True, "Đã gửi — có thể chờ admin duyệt"
+                return True, "Đã gửi bài"
+            if any(k in post_resp.text.lower() for k in (
+                "pending", "chờ duyệt", "chờ phê duyệt", "awaiting approval",
+                "your post has been submitted", "bài viết của bạn đã được gửi",
+            )):
+                return True, "Đã gửi — chờ admin duyệt"
 
             return False, "Mobile: không xác nhận được bài đăng"
         except Exception as exc:
@@ -1926,12 +1931,10 @@ class App(tk.Tk):
 
                 gid = g["id"]
                 gname = g["name"]
-                self.after(0, lambda n=gname: self._log(f"→ Đang đăng: {n}…", "info"))
+                label = f"{gname} [{gid}]"
+                self.after(0, lambda n=label: self._log(f"→ Đang đăng: {n}…", "info"))
 
                 success, msg_result = self.backend.post_to_group(gid, message, image)
-
-                def _update(i=idx, ok=success, name=gname, res=msg_result, ok_c=ok_count, err_c=err_count):
-                    pass  # handled below
 
                 if success:
                     ok_count += 1
@@ -1940,22 +1943,13 @@ class App(tk.Tk):
 
                 remaining = len(groups) - idx - 1
                 pct = ((idx + 1) / len(groups)) * 100
+                check_url = f"https://www.facebook.com/groups/{gid}"
 
-                self.after(0, lambda ok=success, name=gname, res=msg_result,
-                                      o=ok_count, e=err_count, r=remaining, p=pct, i=idx+1, t=len(groups): (
-                    self._ok_lbl.config(text=str(o)),
-                    self._err_lbl.config(text=str(e)),
-                    self._skip_lbl.config(text=str(r)),
-                    self._progress_var.set(p),
-                    self._progress_label.config(text=f"{i} / {t}"),
-                    self._mini_log.log(
-                        f"{'✓' if ok else '✗'} {name}: {res}",
-                        "ok" if ok else "err",
-                    ),
-                    self._log(
-                        f"[{i}/{t}] {'✅' if ok else '❌'} {name} — {res}",
-                        "ok" if ok else "err",
-                    ),
+                self.after(0, lambda ok=success, name=gname, gid_=gid, res=msg_result,
+                                      url=check_url,
+                                      o=ok_count, e=err_count, r=remaining, p=pct,
+                                      i=idx+1, t=len(groups): self._on_post_result(
+                    ok, name, gid_, res, url, o, e, r, p, i, t
                 ))
 
                 if idx < len(groups) - 1 and not self._stop_flag:
@@ -1964,6 +1958,19 @@ class App(tk.Tk):
             self.after(0, self._on_posting_done)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_post_result(self, ok, name, gid, res, url, o, e, r, p, i, t):
+        self._ok_lbl.config(text=str(o))
+        self._err_lbl.config(text=str(e))
+        self._skip_lbl.config(text=str(r))
+        self._progress_var.set(p)
+        self._progress_label.config(text=f"{i} / {t}")
+        tag = "ok" if ok else "err"
+        self._mini_log.log(f"{'✓' if ok else '✗'} {name} [{gid}]: {res}", tag)
+        self._log(f"[{i}/{t}] {'✅' if ok else '❌'} {name} [{gid}] — {res}", tag)
+        if ok:
+            self._log(f"    🔗 Kiểm tra nhóm: {url}", "info")
+            self._log(f"    📋 Copy ID: {gid}", "info")
 
     def _stop_posting(self):
         self._stop_flag = True
