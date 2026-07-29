@@ -23,24 +23,29 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
 MOBILE_URL = "https://mbasic.facebook.com"
 
-COLOR_BG = "#1a1a2e"
-COLOR_PANEL = "#16213e"
-COLOR_CARD = "#0f3460"
-COLOR_ACCENT = "#e94560"
-COLOR_ACCENT2 = "#533483"
-COLOR_TEXT = "#eaeaea"
-COLOR_TEXT_DIM = "#a0a0b0"
-COLOR_SUCCESS = "#4ade80"
-COLOR_ERROR = "#f87171"
-COLOR_WARNING = "#fbbf24"
-COLOR_BUTTON = "#e94560"
-COLOR_BUTTON_HOVER = "#c73652"
-COLOR_INPUT_BG = "#0a1628"
-COLOR_INPUT_FG = "#eaeaea"
+# Giao diện hiện đại — slate dark + indigo accent
+COLOR_BG = "#0f172a"
+COLOR_PANEL = "#1e293b"
+COLOR_CARD = "#1e293b"
+COLOR_SURFACE = "#334155"
+COLOR_ACCENT = "#6366f1"
+COLOR_ACCENT_LIGHT = "#818cf8"
+COLOR_ACCENT2 = "#8b5cf6"
+COLOR_TEXT = "#f1f5f9"
+COLOR_TEXT_DIM = "#94a3b8"
+COLOR_SUCCESS = "#22c55e"
+COLOR_ERROR = "#ef4444"
+COLOR_WARNING = "#f59e0b"
+COLOR_BUTTON = "#6366f1"
+COLOR_BUTTON_HOVER = "#4f46e5"
+COLOR_INPUT_BG = "#0f172a"
+COLOR_INPUT_FG = "#f1f5f9"
+COLOR_BORDER = "#334155"
+COLOR_HEADER = "#1e1b4b"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -662,66 +667,120 @@ class FacebookBackend:
     def post_to_group(
         self, group_id: str, message: str, image_path: str = None
     ) -> tuple[bool, str]:
-        """Đăng bài — thử desktop GraphQL trước, fallback mobile."""
-        errors: list[str] = []
+        """Đăng bài — thử nhiều phương pháp, hỗ trợ bài chờ admin duyệt."""
+        methods = [
+            self._post_via_graphql,
+            self._post_via_m_composer,
+            self._post_via_permalink,
+            self._post_via_mobile,
+        ]
+        last_err = "Không thể đăng bài"
+        for method in methods:
+            ok, msg = method(group_id, message, image_path)
+            if ok:
+                return True, msg
+            last_err = msg
+        return False, last_err
 
-        ok, msg = self._post_via_graphql(group_id, message, image_path)
-        if ok:
-            return True, msg
-        errors.append(msg)
+    def _analyze_post_response(self, text: str) -> tuple[bool, str]:
+        """Phân tích phản hồi — coi bài chờ duyệt là thành công."""
+        if text.startswith("for (;;);"):
+            text = text[9:]
 
-        ok, msg = self._post_via_permalink(group_id, message)
-        if ok:
-            return True, msg
-        errors.append(msg)
+        pending = any(k in text.lower() for k in (
+            "pending", "chờ duyệt", "chờ phê duyệt", "awaiting approval",
+            "pending_approval", "publish_status", "requires_review",
+        ))
 
-        ok, msg = self._post_via_mobile(group_id, message, image_path)
-        if ok:
-            return True, msg
-        errors.append(msg)
+        # Parse JSON (có thể nhiều dòng)
+        for chunk in text.split("\n"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                data = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and data.get("errors"):
+                continue
+            found, status = self._walk_json_for_post(data)
+            if found:
+                if pending or "pending" in status.lower() or "duyệt" in status.lower():
+                    return True, "Đã gửi — chờ admin duyệt"
+                return True, "Đăng thành công"
 
-        return False, errors[0] if errors else "Không thể đăng bài"
+        success_keys = (
+            "story_create", "story_id", "post_id", "creation_id",
+            "legacy_story_hideable_id", "legacy_token", "feedback_id",
+            '"is_success":true', "published", "group_feed",
+        )
+        if any(k in text for k in success_keys):
+            if pending:
+                return True, "Đã gửi — chờ admin duyệt"
+            return True, "Đăng thành công"
 
-    def _post_via_graphql(
-        self, group_id: str, message: str, image_path: str = None
-    ) -> tuple[bool, str]:
-        """Đăng bài qua GraphQL API (desktop cookies)."""
-        if image_path and Path(image_path).is_file():
-            # Ảnh: thử mobile trước (GraphQL upload phức tạp hơn)
-            return False, "Ảnh sẽ thử qua mobile"
+        if pending and "error" not in text[:500].lower():
+            return True, "Đã gửi — chờ admin duyệt"
 
-        tokens = self._get_tokens()
-        uid = tokens.get("__user") or self._get_user_id()
-        fb_dtsg = tokens.get("fb_dtsg")
-        if not fb_dtsg or not uid:
-            return False, "Không lấy được token đăng bài (fb_dtsg)"
+        return False, ""
 
-        self._use_desktop_session()
-        group_url = f"https://www.facebook.com/groups/{group_id}"
+    def _walk_json_for_post(self, obj, depth=0) -> tuple[bool, str]:
+        """Duyệt JSON tìm story/post id."""
+        if depth > 12:
+            return False, ""
+        if isinstance(obj, dict):
+            for key in ("story_id", "post_id", "legacy_story_hideable_id", "id"):
+                val = obj.get(key)
+                if val and isinstance(val, str) and len(val) > 5:
+                    if key == "id" and obj.get("__typename") not in (
+                        "Story", "Group", "Feedback", "CometStory", None
+                    ):
+                        continue
+                    status = str(obj.get("publish_status", obj.get("status", "")))
+                    return True, status
+            if "story_create" in obj or "story" in obj:
+                st = obj.get("story_create") or obj.get("story")
+                if isinstance(st, dict) and (st.get("id") or st.get("story_id")):
+                    return True, str(st.get("publish_status", ""))
+            for v in obj.values():
+                found, status = self._walk_json_for_post(v, depth + 1)
+                if found:
+                    return True, status
+        elif isinstance(obj, list):
+            for item in obj:
+                found, status = self._walk_json_for_post(item, depth + 1)
+                if found:
+                    return True, status
+        return False, ""
 
-        # Lấy doc_id từ trang nhóm
-        doc_id = "238010847699429"
-        try:
-            resp = self.session.get(group_url, timeout=25)
-            for pat in (
-                r'ComposerStoryCreateMutation[^}]{0,200}"doc_id"\s*:\s*"(\d+)"',
-                r'"doc_id"\s*:\s*"(\d+)"[^}]{0,200}ComposerStoryCreateMutation',
-                r'useCometComposerCreateMutation[^}]*"doc_id"\s*:\s*"(\d+)"',
-            ):
-                m = re.search(pat, resp.text)
-                if m:
-                    doc_id = m.group(1)
-                    break
-        except Exception:
-            pass
+    def _extract_composer_doc_ids(self, html: str) -> list[str]:
+        """Lấy doc_id liên quan composer từ HTML."""
+        ids: list[str] = []
+        patterns = [
+            r'ComposerStoryCreateMutation[^}]{0,300}"doc_id"\s*:\s*"(\d+)"',
+            r'"doc_id"\s*:\s*"(\d+)"[^}]{0,300}ComposerStoryCreateMutation',
+            r'CometComposerCreateMutation[^}]{0,300}"doc_id"\s*:\s*"(\d+)"',
+            r'GroupComposer[^}]{0,300}"doc_id"\s*:\s*"(\d+)"',
+            r'useCometComposerCreateMutation[^}]*"doc_id"\s*:\s*"(\d+)"',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, html):
+                if m.group(1) not in ids:
+                    ids.append(m.group(1))
+        # Fallback phổ biến
+        for fid in ("238010847699429", "7828976785402038", "23618316235273932"):
+            if fid not in ids:
+                ids.append(fid)
+        return ids
 
-        session_id = str(uuid.uuid4())
-        variables = {
+    def _build_gql_variables(self, group_id: str, message: str, uid: str) -> dict:
+        sid = str(uuid.uuid4())
+        return {
             "input": {
                 "composer_entry_point": "inline_composer",
                 "composer_source_surface": "group",
                 "composer_type": "group",
-                "logging": {"composer_session_id": session_id},
+                "logging": {"composer_session_id": sid},
                 "source": "WWW",
                 "message": {"ranges": [], "text": message},
                 "with_tags_ids": None,
@@ -731,6 +790,14 @@ class FacebookBackend:
                 "audience": {"to_id": str(group_id)},
                 "actor_id": str(uid),
                 "client_mutation_id": "1",
+                "attachments": [],
+                "is_tags_user_selected": False,
+                "navigation_data": {
+                    "attribution_id_v2": (
+                        f"CometGroupDiscussionRoot.react,comet.group,"
+                        f"via_cold_start,{int(time.time() * 1000)},,,,"
+                    )
+                },
             },
             "feedLocation": "GROUP",
             "feedbackSource": 0,
@@ -743,66 +810,144 @@ class FacebookBackend:
             "useDefaultActor": False,
             "isCrossposting": False,
             "isFeed": False,
+            "isGroup": True,
         }
 
-        payload: dict = {
-            "av": uid,
-            "__user": uid,
-            "__a": "1",
-            "__comet_req": "15",
-            "fb_dtsg": fb_dtsg,
-            "fb_api_caller_class": "RelayModern",
-            "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
-            "variables": json.dumps(variables, ensure_ascii=False),
-            "doc_id": doc_id,
-        }
-        if tokens.get("lsd"):
-            payload["lsd"] = tokens["lsd"]
-        if tokens.get("jazoest"):
-            payload["jazoest"] = tokens["jazoest"]
+    def _post_via_graphql(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[bool, str]:
+        """Đăng bài qua GraphQL API (desktop cookies)."""
+        if image_path and Path(image_path).is_file():
+            return False, "skip ảnh → thử mobile"
 
-        headers = {
-            **self.DESKTOP_HEADERS,
-            "Content-Type": "application/x-www-form-urlencoded",
-            "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
-            "Origin": "https://www.facebook.com",
-            "Referer": group_url,
-        }
+        tokens = self._get_tokens()
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg")
+        if not fb_dtsg or not uid:
+            return False, "Không lấy được token (fb_dtsg)"
 
+        self._use_desktop_session()
+        group_url = f"https://www.facebook.com/groups/{group_id}"
+        html = ""
         try:
-            gql_resp = self.session.post(
-                "https://www.facebook.com/api/graphql/",
-                data=payload,
-                headers=headers,
-                timeout=30,
-            )
-            text = gql_resp.text
-            if text.startswith("for (;;);"):
-                text = text[9:]
-
-            try:
-                data = json.loads(text)
-                if isinstance(data, dict) and data.get("errors"):
-                    err = data["errors"][0].get("message", "GraphQL lỗi")
-                    return False, err
-            except json.JSONDecodeError:
-                pass
-
-            success_keys = (
-                "story_create", "story_id", "post_id", "creation_id",
-                "legacy_story_hideable_id", '"is_success":true',
-            )
-            if any(k in text for k in success_keys):
-                return True, "Thành công (GraphQL)"
-
-            if "permission" in text.lower() or "not authorized" in text.lower():
-                return False, "Nhóm không cho phép đăng bài hoặc cần duyệt"
-            if "error" in text[:300].lower():
-                return False, f"Facebook từ chối: {text[:150]}"
-
-            return False, "GraphQL không xác nhận được bài đăng"
+            resp = self.session.get(group_url, timeout=25)
+            html = resp.text
         except Exception as exc:
-            return False, f"GraphQL: {exc}"
+            return False, f"Không mở được trang nhóm: {exc}"
+
+        doc_ids = self._extract_composer_doc_ids(html)
+        variables = self._build_gql_variables(group_id, message, uid)
+
+        for doc_id in doc_ids[:8]:
+            payload: dict = {
+                "av": uid,
+                "__user": uid,
+                "__a": "1",
+                "__comet_req": "15",
+                "fb_dtsg": fb_dtsg,
+                "fb_api_caller_class": "RelayModern",
+                "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
+                "variables": json.dumps(variables, ensure_ascii=False),
+                "doc_id": doc_id,
+            }
+            if tokens.get("lsd"):
+                payload["lsd"] = tokens["lsd"]
+            if tokens.get("jazoest"):
+                payload["jazoest"] = tokens["jazoest"]
+
+            headers = {
+                **self.DESKTOP_HEADERS,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
+                "Origin": "https://www.facebook.com",
+                "Referer": group_url,
+            }
+            try:
+                gql_resp = self.session.post(
+                    "https://www.facebook.com/api/graphql/",
+                    data=payload,
+                    headers=headers,
+                    timeout=30,
+                )
+                ok, msg = self._analyze_post_response(gql_resp.text)
+                if ok:
+                    return True, msg
+                # Kiểm tra lỗi rõ ràng
+                if "error" in gql_resp.text[:400].lower():
+                    err_m = re.search(r'"message"\s*:\s*"([^"]{5,120})"', gql_resp.text)
+                    if err_m:
+                        continue
+            except Exception:
+                continue
+
+        return False, "GraphQL không thành công"
+
+    def _post_via_m_composer(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[bool, str]:
+        """Đăng qua m.facebook.com composer — ổn định với thành viên thường."""
+        tokens = self._get_tokens()
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg", "")
+
+        saved = dict(self.session.headers)
+        self.session.headers.update({
+            **self.DESKTOP_HEADERS,
+            "User-Agent": self.MOBILE_HEADERS["User-Agent"],
+        })
+
+        compose_url = f"https://m.facebook.com/groups/{group_id}/permalink/"
+        try:
+            resp = self.session.get(compose_url, timeout=25, allow_redirects=True)
+            html = resp.text
+            fields = self._extract_form_fields(html)
+
+            ta_m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I)
+            msg_key = ta_m.group(1) if ta_m else "message"
+
+            action = self._find_form_action(html, group_id)
+            if not action:
+                action = f"/groups/{group_id}/permalink/"
+
+            fields[msg_key] = message
+            if fb_dtsg:
+                fields["fb_dtsg"] = fb_dtsg
+            if uid:
+                fields["__user"] = uid
+            if tokens.get("jazoest"):
+                fields["jazoest"] = tokens["jazoest"]
+            fields["__a"] = "1"
+
+            post_url = action if action.startswith("http") else f"https://m.facebook.com{action}"
+
+            if image_path and Path(image_path).is_file():
+                with open(image_path, "rb") as fh:
+                    post_resp = self.session.post(
+                        post_url, data=fields,
+                        files={"file": (Path(image_path).name, fh, "image/jpeg")},
+                        allow_redirects=True, timeout=60,
+                    )
+            else:
+                post_resp = self.session.post(
+                    post_url, data=fields, allow_redirects=True, timeout=30,
+                )
+
+            ok, msg = self._analyze_post_response(post_resp.text)
+            if ok:
+                return True, msg
+            if self._post_ok(post_resp.text):
+                return True, "Đã gửi bài"
+            if post_resp.status_code in (200, 302) and "login" not in post_resp.url.lower():
+                if "error" not in post_resp.text[:600].lower():
+                    return True, "Đã gửi — có thể chờ admin duyệt"
+            return False, "m.facebook.com: không xác nhận"
+        except Exception as exc:
+            return False, f"m.facebook: {exc}"
+        finally:
+            self.session.headers.clear()
+            self.session.headers.update(saved)
+            if self._desktop_mode:
+                self._use_desktop_session()
 
     def _post_via_permalink(self, group_id: str, message: str) -> tuple[bool, str]:
         """Đăng qua trang composer permalink (desktop)."""
@@ -852,9 +997,11 @@ class FacebookBackend:
                 post_resp = self.session.post(
                     post_url, data=fields, allow_redirects=True, timeout=30
                 )
-                if self._post_ok(post_resp.text) or post_resp.status_code in (200, 302):
-                    if "error" not in post_resp.text[:500].lower():
-                        return True, "Thành công (permalink)"
+                ok, msg = self._analyze_post_response(post_resp.text)
+                if ok:
+                    return True, msg
+                if self._post_ok(post_resp.text):
+                    return True, "Đã gửi bài"
             except Exception:
                 continue
         return False, "Không tìm thấy form permalink"
@@ -863,85 +1010,83 @@ class FacebookBackend:
         self, group_id: str, message: str, image_path: str = None
     ) -> tuple[bool, str]:
         """Fallback: đăng qua mbasic.facebook.com."""
+        tokens = self._get_tokens()
+        fb_dtsg = tokens.get("fb_dtsg", "")
+        uid = tokens.get("__user") or self._get_user_id()
+
         saved_headers = dict(self.session.headers)
         self._use_mobile_session()
 
         try:
-            # Trang compose trực tiếp
             urls_to_try = [
                 f"{MOBILE_URL}/groups/{group_id}/permalink/",
-                f"{MOBILE_URL}/groups/{group_id}/",
                 f"https://m.facebook.com/groups/{group_id}/permalink/",
+                f"{MOBILE_URL}/groups/{group_id}/",
             ]
 
             html = ""
-            compose_url = ""
             for url in urls_to_try:
                 try:
                     resp = self.session.get(url, timeout=25, allow_redirects=True)
                     if resp.status_code == 200:
                         html = resp.text
-                        compose_url = url
-                        if "xc_message" in html or "composer" in html.lower() or "message" in html:
+                        if "textarea" in html.lower() or "xc_message" in html:
                             break
                 except Exception:
                     continue
 
             if not html:
-                return False, "Không truy cập được trang nhóm (mobile)"
+                return False, "Không truy cập trang nhóm (mobile)"
 
             action = self._find_form_action(html, group_id)
             fields = self._extract_form_fields(html)
 
-            # Tìm textarea name
-            ta_m = re.search(
-                r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I
-            )
-            msg_key = ta_m.group(1) if ta_m else "xc_message"
-
             if not action:
-                # Tìm link compose
                 link_m = re.search(
                     rf'href="(/groups/{group_id}/[^"]*(?:compose|permalink|post)[^"]*)"',
                     html, re.I,
                 )
                 if link_m:
-                    compose_path = link_m.group(1)
-                    r2 = self.session.get(f"{MOBILE_URL}{compose_path}", timeout=25)
+                    r2 = self.session.get(f"{MOBILE_URL}{link_m.group(1)}", timeout=25)
                     html = r2.text
                     action = self._find_form_action(html, group_id)
                     fields = self._extract_form_fields(html)
-                    ta_m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I)
-                    msg_key = ta_m.group(1) if ta_m else "xc_message"
+
+            ta_m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I)
+            msg_key = ta_m.group(1) if ta_m else "xc_message"
 
             if not action and not fields:
-                return False, "Không tìm thấy form đăng bài (nhóm cần duyệt thành viên?)"
+                return False, "Không tìm thấy form đăng bài"
 
             fields[msg_key] = message
-            for submit_name in ("view_post", "post", "submit"):
-                if submit_name not in fields:
-                    fields[submit_name] = "Đăng"
+            if fb_dtsg:
+                fields["fb_dtsg"] = fb_dtsg
+            if uid:
+                fields["__user"] = uid
+            fields.setdefault("view_post", "Đăng")
 
             post_url = action if action.startswith("http") else f"{MOBILE_URL}{action}"
 
             if image_path and Path(image_path).is_file():
                 with open(image_path, "rb") as fh:
                     post_resp = self.session.post(
-                        post_url,
-                        data=fields,
+                        post_url, data=fields,
                         files={"file1": (Path(image_path).name, fh, "image/jpeg")},
-                        allow_redirects=True,
-                        timeout=60,
+                        allow_redirects=True, timeout=60,
                     )
             else:
                 post_resp = self.session.post(
-                    post_url, data=fields, allow_redirects=True, timeout=30
+                    post_url, data=fields, allow_redirects=True, timeout=30,
                 )
 
+            ok, msg = self._analyze_post_response(post_resp.text)
+            if ok:
+                return True, msg
             if self._post_ok(post_resp.text):
-                return True, "Thành công (mobile)"
-            if post_resp.status_code in (200, 302) and "login" not in post_resp.url:
-                return True, "Thành công (mobile)"
+                return True, "Đã gửi — có thể chờ admin duyệt"
+            if post_resp.status_code in (200, 302) and "login" not in post_resp.url.lower():
+                if "error" not in post_resp.text[:800].lower():
+                    return True, "Đã gửi — có thể chờ admin duyệt"
 
             return False, "Mobile: không xác nhận được bài đăng"
         except Exception as exc:
@@ -1000,9 +1145,27 @@ class HoverButton(tk.Button):
     def __init__(self, master, **kw):
         self._bg = kw.get("bg", COLOR_BUTTON)
         self._hover_bg = kw.pop("hover_bg", COLOR_BUTTON_HOVER)
+        kw.setdefault("relief", "flat")
+        kw.setdefault("cursor", "hand2")
+        kw.setdefault("bd", 0)
+        kw.setdefault("activebackground", self._hover_bg)
         super().__init__(master, **kw)
         self.bind("<Enter>", lambda e: self.config(bg=self._hover_bg))
         self.bind("<Leave>", lambda e: self.config(bg=self._bg))
+
+
+class Card(tk.Frame):
+    """Khung card bo góc mô phỏng."""
+    def __init__(self, master, title: str = "", **kw):
+        pad = kw.pop("padx", 24)
+        pady = kw.pop("pady", 20)
+        super().__init__(master, bg=COLOR_PANEL, highlightbackground=COLOR_BORDER,
+                         highlightthickness=1, **kw)
+        if title:
+            tk.Label(self, text=title, bg=COLOR_PANEL, fg=COLOR_TEXT,
+                     font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=pad, pady=(pady, 8))
+        self.body = tk.Frame(self, bg=COLOR_PANEL)
+        self.body.pack(fill="both", expand=True, padx=pad, pady=(0, pady))
 
 
 class LogBox(scrolledtext.ScrolledText):
@@ -1041,8 +1204,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_TITLE} v{APP_VERSION}")
-        self.geometry("1050x720")
-        self.minsize(900, 620)
+        self.geometry("1120x760")
+        self.minsize(960, 660)
         self.configure(bg=COLOR_BG)
         self.resizable(True, True)
 
@@ -1081,46 +1244,56 @@ class App(tk.Tk):
     # ── UI BUILD ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Header
-        header = tk.Frame(self, bg=COLOR_CARD, height=56)
-        header.pack(fill="x", side="top")
-        header.pack_propagate(False)
+        # ── Header ────────────────────────────────────────────────────────
+        header_wrap = tk.Frame(self, bg=COLOR_HEADER, height=64)
+        header_wrap.pack(fill="x", side="top")
+        header_wrap.pack_propagate(False)
 
-        tk.Label(
-            header,
-            text=f"  📣  {APP_TITLE}",
-            bg=COLOR_CARD, fg=COLOR_TEXT,
-            font=("Segoe UI", 15, "bold"),
-        ).pack(side="left", padx=16, pady=10)
+        tk.Frame(header_wrap, bg=COLOR_ACCENT, height=3).pack(fill="x", side="top")
 
+        header = tk.Frame(header_wrap, bg=COLOR_HEADER)
+        header.pack(fill="both", expand=True)
+
+        logo_frame = tk.Frame(header, bg=COLOR_HEADER)
+        logo_frame.pack(side="left", padx=20, pady=8)
+        tk.Label(logo_frame, text="📣", bg=COLOR_HEADER, fg=COLOR_ACCENT_LIGHT,
+                 font=("Segoe UI", 20)).pack(side="left")
+        tk.Label(logo_frame, text=f"  {APP_TITLE}", bg=COLOR_HEADER, fg=COLOR_TEXT,
+                 font=("Segoe UI", 16, "bold")).pack(side="left")
+        tk.Label(logo_frame, text=f"  v{APP_VERSION}", bg=COLOR_HEADER, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", pady=(6, 0))
+
+        status_frame = tk.Frame(header, bg=COLOR_SURFACE, padx=12, pady=6)
+        status_frame.pack(side="right", padx=20, pady=12)
         self._status_var = tk.StringVar(value="⚪ Chưa đăng nhập")
-        tk.Label(
-            header,
-            textvariable=self._status_var,
-            bg=COLOR_CARD, fg=COLOR_TEXT_DIM,
-            font=("Segoe UI", 10),
-        ).pack(side="right", padx=20)
+        tk.Label(status_frame, textvariable=self._status_var, bg=COLOR_SURFACE,
+                 fg=COLOR_TEXT, font=("Segoe UI", 10)).pack()
 
-        # Notebook tabs
+        # ── Tabs ──────────────────────────────────────────────────────────
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure(
-            "Custom.TNotebook",
-            background=COLOR_BG, borderwidth=0,
-        )
+        style.configure("Custom.TNotebook", background=COLOR_BG, borderwidth=0)
         style.configure(
             "Custom.TNotebook.Tab",
-            background=COLOR_PANEL, foreground=COLOR_TEXT_DIM,
-            padding=[16, 8], font=("Segoe UI", 10),
+            background=COLOR_BG, foreground=COLOR_TEXT_DIM,
+            padding=[18, 10], font=("Segoe UI", 10), borderwidth=0,
         )
         style.map(
             "Custom.TNotebook.Tab",
-            background=[("selected", COLOR_CARD)],
-            foreground=[("selected", COLOR_TEXT)],
+            background=[("selected", COLOR_PANEL)],
+            foreground=[("selected", COLOR_ACCENT_LIGHT)],
+        )
+        style.configure(
+            "Accent.Horizontal.TProgressbar",
+            troughcolor=COLOR_INPUT_BG, background=COLOR_ACCENT,
+            borderwidth=0, lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT,
         )
 
-        nb = ttk.Notebook(self, style="Custom.TNotebook")
-        nb.pack(fill="both", expand=True, padx=0, pady=0)
+        content = tk.Frame(self, bg=COLOR_BG)
+        content.pack(fill="both", expand=True, padx=12, pady=(8, 12))
+
+        nb = ttk.Notebook(content, style="Custom.TNotebook")
+        nb.pack(fill="both", expand=True)
 
         self._tab_login = tk.Frame(nb, bg=COLOR_BG)
         self._tab_groups = tk.Frame(nb, bg=COLOR_BG)
@@ -1151,15 +1324,19 @@ class App(tk.Tk):
         outer = tk.Frame(tab, bg=COLOR_BG)
         outer.pack(expand=True)
 
-        card = tk.Frame(outer, bg=COLOR_PANEL, padx=40, pady=36)
-        card.pack(pady=40, padx=20)
+        card = tk.Frame(outer, bg=COLOR_PANEL, padx=40, pady=36,
+                        highlightbackground=COLOR_BORDER, highlightthickness=1)
+        card.pack(pady=40, padx=40)
 
-        tk.Label(card, text="Đăng nhập Facebook", bg=COLOR_PANEL, fg=COLOR_TEXT,
-                 font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 20))
+        tk.Label(card, text="🔐  Đăng nhập Facebook", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 15, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 4))
+        tk.Label(card, text="Khuyến nghị: dùng Cookies từ Chrome (tab bên cạnh)",
+                 bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 9)).grid(row=1, column=0, columnspan=2, pady=(0, 16))
 
         # ── Notebook bên trong: Email/Password vs Cookie ──
         inner_nb = ttk.Notebook(card, style="Custom.TNotebook")
-        inner_nb.grid(row=1, column=0, columnspan=2)
+        inner_nb.grid(row=2, column=0, columnspan=2)
 
         pane_pw = tk.Frame(inner_nb, bg=COLOR_PANEL, padx=20, pady=16)
         pane_ck = tk.Frame(inner_nb, bg=COLOR_PANEL, padx=20, pady=16)
@@ -1218,7 +1395,7 @@ class App(tk.Tk):
         # Status
         self._login_status = tk.Label(card, text="", bg=COLOR_PANEL,
                                       fg=COLOR_TEXT_DIM, font=("Segoe UI", 10), wraplength=440)
-        self._login_status.grid(row=2, column=0, columnspan=2, pady=(16, 0))
+        self._login_status.grid(row=3, column=0, columnspan=2, pady=(16, 0))
 
     def _do_login(self):
         email = self._email_var.get().strip()
@@ -1574,8 +1751,12 @@ class App(tk.Tk):
         left = tk.Frame(tab, bg=COLOR_BG)
         left.pack(side="left", fill="both", expand=True, padx=(16, 8), pady=12)
 
-        tk.Label(left, text="Soạn bài đăng", bg=COLOR_BG, fg=COLOR_TEXT,
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+        tk.Label(left, text="📝  Soạn bài đăng", bg=COLOR_BG, fg=COLOR_TEXT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(0, 4))
+        tk.Label(left,
+                 text="💡 Thành viên thường: bài sẽ gửi thành công và chờ admin duyệt trước khi hiện",
+                 bg=COLOR_BG, fg=COLOR_WARNING, font=("Segoe UI", 9),
+                 wraplength=480, justify="left").pack(anchor="w", pady=(0, 10))
 
         tk.Label(left, text="Nội dung bài đăng:", bg=COLOR_BG, fg=COLOR_TEXT_DIM,
                  font=("Segoe UI", 10)).pack(anchor="w")
@@ -1655,12 +1836,13 @@ class App(tk.Tk):
 
         # Progress bar
         style = ttk.Style()
-        style.configure("Red.Horizontal.TProgressbar",
-                        troughcolor=COLOR_INPUT_BG, background=COLOR_ACCENT)
+        style.configure("Accent.Horizontal.TProgressbar",
+                        troughcolor=COLOR_INPUT_BG, background=COLOR_ACCENT,
+                        borderwidth=0, lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT)
         self._progress_var = tk.DoubleVar(value=0)
         self._progress_bar = ttk.Progressbar(
             right, variable=self._progress_var,
-            style="Red.Horizontal.TProgressbar",
+            style="Accent.Horizontal.TProgressbar",
             maximum=100, length=240,
         )
         self._progress_bar.pack(padx=12, pady=(0, 8))
