@@ -23,7 +23,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
 MOBILE_URL = "https://mbasic.facebook.com"
 
@@ -682,7 +682,6 @@ class FacebookBackend:
                 except Exception:
                     pass
 
-        # Luôn thử GraphQL trước (kể cả khi có ảnh)
         methods = [
             ("GraphQL", self._post_via_graphql),
             ("Ajax", self._post_via_ajax_feed),
@@ -697,12 +696,166 @@ class FacebookBackend:
                 status, msg = method(group_id, message, image_path)
             except Exception as exc:
                 status, msg = "failed", str(exc)
-            if status in ("published", "pending"):
-                _prog(f"{name}: {msg}")
-                return status, msg
-            last_err = msg or f"{name} thất bại"
-            _prog(f"{name}: {last_err}")
+
+            if status not in ("published", "pending"):
+                last_err = msg or f"{name} thất bại"
+                _prog(f"{name}: {last_err}")
+                continue
+
+            # Bắt buộc xác minh lại trên nhóm — tránh báo thành công giả
+            _prog(f"{name} báo {status} → đang kiểm tra trên nhóm…")
+            post_id = None
+            m = re.search(
+                r"(?:post[:\s]*|Đăng[^(]*\()([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})",
+                msg,
+            )
+            if not m:
+                m = re.search(r"\(([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})\)", msg)
+            if m:
+                post_id = m.group(1)
+            # post_id trùng group_id → giả
+            if post_id and str(post_id) == str(group_id):
+                post_id = None
+
+            verified = None
+            try:
+                verified = self._verify_post_status(
+                    group_id, message, post_id=post_id, claimed=status
+                )
+            except Exception as exc:
+                _prog(f"Xác minh lỗi: {exc}")
+                verified = None
+
+            if verified in ("published", "pending"):
+                label = "Đã đăng lên nhóm" if verified == "published" else "Đang chờ admin duyệt"
+                extra = " (đã xác minh)"
+                if post_id:
+                    extra = f" (post: {post_id[:28]}, đã xác minh)"
+                _prog(f"{name}: {label}{extra}")
+                return verified, f"{label}{extra}"
+
+            # Báo success nhưng không thấy bài → coi là thất bại, thử cách khác
+            last_err = (
+                f"{name} báo OK nhưng không thấy bài trên nhóm/hàng chờ"
+                + (f" — {msg}" if msg else "")
+            )
+            _prog(f"⚠ {last_err}")
+
         return "failed", last_err
+
+    def _message_snippets(self, message: str) -> list[str]:
+        """Đoạn text dùng để khớp bài trên feed/pending."""
+        snippet = re.sub(r"\s+", " ", (message or "").strip())
+        checks: list[str] = []
+        if len(snippet) >= 10:
+            checks.append(snippet[:48].lower())
+        for line in (message or "").split("\n"):
+            line = re.sub(r"\s+", " ", line).strip()
+            if len(line) >= 10 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
+                checks.append(line[:40].lower())
+                break
+        # Bỏ trùng
+        return list(dict.fromkeys(c for c in checks if c))
+
+    def _verify_post_status(
+        self,
+        group_id: str,
+        message: str,
+        post_id: str | None = None,
+        claimed: str | None = None,
+    ) -> str | None:
+        """
+        Xác minh bài đã lên feed hoặc hàng chờ.
+        Returns: published | pending | None
+        """
+        checks = self._message_snippets(message)
+        self._use_desktop_session()
+
+        # Thử vài lần — FB đôi khi chậm index
+        for attempt in range(3):
+            if attempt:
+                time.sleep(1.8)
+            else:
+                time.sleep(1.0)
+
+            found = self._verify_once(group_id, checks, post_id=post_id, claimed=claimed)
+            if found:
+                return found
+        return None
+
+    def _verify_once(
+        self,
+        group_id: str,
+        checks: list[str],
+        post_id: str | None = None,
+        claimed: str | None = None,
+    ) -> str | None:
+        urls: list[tuple[str, str]] = []
+        if post_id:
+            pid = str(post_id)
+            if pid.isdigit():
+                urls.extend([
+                    ("by_id", f"https://www.facebook.com/groups/{group_id}/posts/{pid}"),
+                    ("by_id", f"https://www.facebook.com/groups/{group_id}/permalink/{pid}/"),
+                    ("by_id", f"https://mbasic.facebook.com/story.php?story_fbid={pid}&id={group_id}"),
+                    ("by_id", f"https://m.facebook.com/story.php?story_fbid={pid}&id={group_id}"),
+                ])
+            else:
+                urls.append(("by_id", f"https://www.facebook.com/{pid}"))
+
+        urls.extend([
+            ("pending", f"https://mbasic.facebook.com/groups/{group_id}/pending"),
+            ("pending", f"https://m.facebook.com/groups/{group_id}/pending"),
+            ("pending", f"https://www.facebook.com/groups/{group_id}/pending_posts"),
+            ("pending", f"https://www.facebook.com/groups/{group_id}/pending"),
+            ("feed", f"https://mbasic.facebook.com/groups/{group_id}"),
+            ("feed", f"https://m.facebook.com/groups/{group_id}"),
+            ("feed", f"https://www.facebook.com/groups/{group_id}"),
+        ])
+
+        for kind, url in urls:
+            try:
+                resp = self.session.get(url, timeout=12, allow_redirects=True)
+                if resp.status_code >= 400:
+                    continue
+                html = resp.text
+                low = html.lower()
+                final = resp.url.lower()
+
+                if "login" in final or "/login" in final:
+                    continue
+                if any(x in low[:2500] for x in (
+                    "content isn't available", "nội dung không",
+                    "this content isn't available", "không khả dụng",
+                )):
+                    continue
+
+                has_pid = bool(post_id and str(post_id) in html)
+                matched = any(c in low for c in checks) if checks else False
+
+                if kind == "by_id":
+                    # URL bài mở được + (có id hoặc khớp nội dung)
+                    if has_pid or matched:
+                        if "pending" in final or "pending" in low[:3000]:
+                            return "pending"
+                        if claimed == "pending":
+                            return "pending"
+                        return "published"
+                    continue
+
+                # feed / pending chung: bắt buộc khớp nội dung hoặc thấy post_id
+                if not matched and not has_pid:
+                    continue
+
+                if kind == "pending":
+                    return "pending"
+
+                if "pending" in final:
+                    return "pending"
+                return "published"
+            except Exception:
+                continue
+        return None
 
     def _upload_photo(self, image_path: str, tokens: dict) -> str | None:
         """Upload ảnh, trả về photo_id nếu thành công."""
@@ -899,12 +1052,12 @@ class FacebookBackend:
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
-            found, status = self._walk_json_for_post(data)
+            found, status = self._extract_created_post_id(data)
             if found:
                 post_id = found
                 publish_status = status
                 break
-            # Tìm URL bài
+            # Tìm URL bài trong JSON (groups/.../posts/...)
             url_m = re.search(
                 r'https:\\?/\\?/www\.facebook\.com\\?/groups\\?/[^"\\]+\\?/(?:posts|permalink)\\?/[^"\\]+',
                 chunk,
@@ -913,14 +1066,16 @@ class FacebookBackend:
                 story_url = url_m.group(0).replace("\\/", "/")
 
         if not post_id:
+            # Chỉ lấy id gần ngữ cảnh tạo bài — tránh id feed cũ
             for pat in (
-                r'"legacy_story_hideable_id"\s*:\s*"(\d+)"',
-                r'"post_id"\s*:\s*"(\d+)"',
-                r'"story_id"\s*:\s*"([^"]+)"',
+                r'"story_create"\s*:\s*\{.{0,800}?"legacy_story_hideable_id"\s*:\s*"(\d+)"',
+                r'"story_create"\s*:\s*\{.{0,800}?"post_id"\s*:\s*"(\d+)"',
                 r'"creation_story"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
                 r'"story_create"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
+                r'"legacy_story_hideable_id"\s*:\s*"(\d+)"',
+                r'"post_id"\s*:\s*"(\d+)"',
             ):
-                m = re.search(pat, text)
+                m = re.search(pat, text, re.S)
                 if m:
                     post_id = m.group(1)
                     break
@@ -931,14 +1086,8 @@ class FacebookBackend:
                 return "pending", f"Đang chờ admin duyệt ({label})"
             return "published", f"Đã đăng lên nhóm ({label})"
 
-        # Có data.story_create mà không lỗi → thường là OK
-        if re.search(r'"story_create"\s*:\s*\{', text) and '"errors"' not in text[:500]:
-            if is_pending:
-                return "pending", "Đang chờ admin duyệt"
-            return "published", "Đã gửi bài (GraphQL story_create)"
-
-        # Debug ngắn khi fail
-        snippet = re.sub(r"\s+", " ", raw[:180])
+        # Không có post_id / URL → KHÔNG báo thành công
+        snippet = re.sub(r"\s+", " ", raw[:160])
         return "unknown", snippet
 
     def _extract_composer_doc_ids(self, html: str) -> list[str]:
@@ -1156,84 +1305,101 @@ class FacebookBackend:
                     status, msg = self._analyze_post_response(resp.text)
                     if status in ("published", "pending"):
                         return status, msg
-                    if self._post_ok(resp.text) or '"payload"' in resp.text:
-                        if "error" not in resp.text[:300].lower():
-                            return "published", "Đã gửi (ajax)"
+                    # Ajax chỉ chấp nhận khi có post id thật (analyze đã lo)
                 except Exception:
                     continue
         return "failed", "Ajax composer thất bại"
 
-    def _verify_post_status(self, group_id: str, message: str) -> str | None:
+    def _walk_json_for_post(
+        self, obj, depth=0, path: str = "", *, create_only: bool = False
+    ) -> tuple[str | None, str]:
         """
-        Kiểm tra sau khi đăng: published / pending / None (không xác định).
+        Duyệt JSON tìm story/post id thật từ kết quả tạo bài.
+        create_only=True: chỉ lấy id trong nhánh story_create / creation_story.
         """
-        snippet = (message or "")[:40].strip()
-        self._use_desktop_session()
-        urls = [
-            f"https://www.facebook.com/groups/{group_id}/pending_posts/",
-            f"https://www.facebook.com/groups/{group_id}/pending/",
-            f"https://m.facebook.com/groups/{group_id}/pending/",
-            f"https://www.facebook.com/groups/{group_id}",
-        ]
-        try:
-            for url in urls:
-                try:
-                    resp = self.session.get(url, timeout=15, allow_redirects=True)
-                    html = resp.text
-                    low = html.lower()
-                    # Trang pending và có nội dung gần giống bài đăng
-                    if "pending" in url and (
-                        "pending" in low or "chờ" in low or "awaiting" in low
-                    ):
-                        if snippet and snippet.lower() in low:
-                            return "pending"
-                        if re.search(r'pending.?post|bài viết chờ|awaiting.?approval', low):
-                            # Có trang pending nhưng chưa chắc là bài của mình
-                            if snippet and snippet[:20].lower() in low:
-                                return "pending"
-                    # Feed nhóm có nội dung bài
-                    if snippet and snippet.lower() in low and "groups/" + group_id in resp.url:
-                        if "pending" not in url:
-                            return "published"
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return None
-
-
-    def _walk_json_for_post(self, obj, depth=0) -> tuple[str | None, str]:
-        """Duyệt JSON tìm story/post id. Trả (post_id, status)."""
         if depth > 14:
             return None, ""
         if isinstance(obj, dict):
-            typename = str(obj.get("__typename", ""))
-            for key in ("legacy_story_hideable_id", "post_id", "story_id"):
-                val = obj.get(key)
-                if val and isinstance(val, (str, int)) and len(str(val)) > 5:
-                    status = str(obj.get("publish_status", obj.get("status", "")))
-                    return str(val), status
-            # id của Story
-            if typename in ("Story", "CometStory", "GroupFeedStory", "Feedback"):
-                val = obj.get("id")
-                if val and isinstance(val, str) and len(val) > 8:
-                    status = str(obj.get("publish_status", obj.get("status", "")))
-                    return val, status
-            for nest_key in ("story_create", "story", "data", "node", "post"):
-                if nest_key in obj and isinstance(obj[nest_key], dict):
-                    found, status = self._walk_json_for_post(obj[nest_key], depth + 1)
+            path_l = path.lower()
+            in_create = any(
+                k in path_l
+                for k in (
+                    "story_create",
+                    "creation_story",
+                    "composer_create",
+                    "story_create_response",
+                )
+            )
+            allow_id = in_create or not create_only
+
+            if allow_id:
+                for key in ("legacy_story_hideable_id", "post_id"):
+                    val = obj.get(key)
+                    if val and isinstance(val, (str, int)) and len(str(val)) >= 8:
+                        status = str(obj.get("publish_status", obj.get("status", "")))
+                        return str(val), status
+
+            if in_create:
+                for key in ("story_id", "id"):
+                    val = obj.get(key)
+                    if not val:
+                        continue
+                    sval = str(val)
+                    if len(sval) < 8:
+                        continue
+                    if sval.isdigit() or sval.startswith("Uzpf") or ":" in sval:
+                        status = str(obj.get("publish_status", obj.get("status", "")))
+                        return sval, status
+                typename = str(obj.get("__typename", ""))
+                if typename in ("Story", "CometStory", "GroupFeedStory"):
+                    val = obj.get("id")
+                    if val and isinstance(val, str) and len(val) > 8:
+                        status = str(obj.get("publish_status", obj.get("status", "")))
+                        return val, status
+
+            prefer = (
+                "story_create",
+                "creation_story",
+                "composer_create",
+                "story_create_response",
+                "data",
+                "story",
+                "node",
+                "post",
+            )
+            for nest_key in prefer:
+                if nest_key in obj and isinstance(obj[nest_key], (dict, list)):
+                    found, status = self._walk_json_for_post(
+                        obj[nest_key],
+                        depth + 1,
+                        f"{path}.{nest_key}",
+                        create_only=create_only,
+                    )
                     if found:
                         return found, status
-            for v in obj.values():
-                found, status = self._walk_json_for_post(v, depth + 1)
+            for k, v in obj.items():
+                if k in prefer:
+                    continue
+                found, status = self._walk_json_for_post(
+                    v, depth + 1, f"{path}.{k}", create_only=create_only
+                )
                 if found:
                     return found, status
         elif isinstance(obj, list):
-            for item in obj:
-                found, status = self._walk_json_for_post(item, depth + 1)
+            for i, item in enumerate(obj):
+                found, status = self._walk_json_for_post(
+                    item, depth + 1, f"{path}[{i}]", create_only=create_only
+                )
                 if found:
                     return found, status
         return None, ""
+
+    def _extract_created_post_id(self, data) -> tuple[str | None, str]:
+        """Ưu tiên id từ story_create; fallback post_id/legacy nếu có."""
+        found, status = self._walk_json_for_post(data, create_only=True)
+        if found:
+            return found, status
+        return self._walk_json_for_post(data, create_only=False)
 
 
 
@@ -1298,24 +1464,20 @@ class FacebookBackend:
                     status, msg = self._analyze_post_response(resp.text)
                     if status in ("published", "pending"):
                         return status, msg
-                    # Redirect về nhóm / story thường là thành công
-                    url_l = resp.url.lower()
-                    if any(k in url_l for k in ("story.php", "permalink", "/posts/", "pending")):
-                        if "pending" in url_l or "chờ" in resp.text.lower():
-                            return "pending", "Đang chờ admin duyệt"
-                        return "published", "Đã gửi bài (composer)"
-                    # HTML có dấu hiệu thành công
-                    if self._post_ok(resp.text):
-                        return "published", "Đã gửi bài (composer)"
-                    if any(k in resp.text.lower() for k in (
-                        "pending", "chờ duyệt", "awaiting approval",
-                        "your post has been submitted", "bài viết của bạn đã được gửi",
-                    )):
-                        return "pending", "Đang chờ admin duyệt"
+                    # Chỉ nhận nếu URL redirect có post id thật
+                    url_l = resp.url
+                    pid_m = re.search(
+                        r"(?:story_fbid|posts/|permalink\.php\?story_fbid=)[=/]?(\d{8,})",
+                        url_l,
+                    )
+                    if pid_m:
+                        if "pending" in url_l.lower():
+                            return "pending", f"Đang chờ admin duyệt ({pid_m.group(1)})"
+                        return "published", f"Đã đăng lên nhóm ({pid_m.group(1)})"
                 except Exception:
                     continue
 
-            return "failed", "Composer: không xác nhận được bài đăng"
+            return "failed", "Composer: không xác nhận được bài đăng (không có post ID)"
         except Exception as exc:
             return "failed", f"Composer: {exc}"
         finally:
@@ -1554,16 +1716,17 @@ class FacebookBackend:
             status, msg = self._analyze_post_response(post_resp.text)
             if status in ("published", "pending"):
                 return status, msg
-            if self._post_ok(post_resp.text):
-                return "published", "Đã gửi bài (mbasic)"
-            if any(k in post_resp.text.lower() for k in (
-                "pending", "chờ duyệt", "awaiting approval",
-                "bài viết của bạn đã được gửi",
-            )):
-                return "pending", "Đang chờ admin duyệt"
+            pid_m = re.search(
+                r"(?:story_fbid|posts/|permalink\.php\?story_fbid=)[=/]?(\d{8,})",
+                post_resp.url,
+            )
+            if pid_m:
+                if "pending" in post_resp.url.lower():
+                    return "pending", f"Đang chờ admin duyệt ({pid_m.group(1)})"
+                return "published", f"Đã đăng lên nhóm ({pid_m.group(1)})"
             if "login" in post_resp.url.lower():
                 return "failed", "Cookies hết hạn — lấy lại cookies"
-            return "failed", "mbasic: không xác nhận được bài đăng"
+            return "failed", "mbasic: không xác nhận được bài đăng (không có post ID)"
         except Exception as exc:
             return "failed", f"mbasic: {exc}"
         finally:
