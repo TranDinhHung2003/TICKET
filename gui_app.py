@@ -6,6 +6,7 @@ Facebook Group Poster — Ứng dụng GUI Desktop
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -16,16 +17,48 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from urllib.parse import unquote
 
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.3.2"
-COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
+APP_VERSION = "1.4.0"
 MOBILE_URL = "https://mbasic.facebook.com"
+
+# Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
+DATA_DIR = Path.home() / ".fb_poster"
+COOKIES_FILE = DATA_DIR / "cookies.json"
+LEGACY_COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
+GROUPS_FILE = DATA_DIR / "groups.json"
+DRAFT_FILE = DATA_DIR / "draft.json"
+IMAGES_DIR = DATA_DIR / "images"
+TOKENS_FILE = DATA_DIR / "tokens.json"
+
+
+def _ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    # Migrate cookies cũ → thư mục mới
+    if not COOKIES_FILE.exists() and LEGACY_COOKIES_FILE.exists():
+        try:
+            shutil.copy2(LEGACY_COOKIES_FILE, COOKIES_FILE)
+        except Exception:
+            pass
+
+
+def _read_json(path: Path, default=None):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+
+def _write_json(path: Path, data) -> None:
+    _ensure_data_dir()
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # Theme cam – trắng
 COLOR_BG = "#FFF7F0"
@@ -85,6 +118,14 @@ class FacebookBackend:
         self._desktop_mode = False
         self._tokens_cache: dict = {}
         self._tokens_cache_time: float = 0.0
+        # post_id đã dùng trong lần chạy batch — tránh xác minh nhầm bài nhóm trước
+        self._used_post_ids: set[str] = set()
+
+    def reset_batch_state(self):
+        """Gọi trước mỗi lần đăng hàng loạt."""
+        self._used_post_ids.clear()
+        self._tokens_cache.clear()
+        self._tokens_cache_time = 0.0
 
     def set_proxy(self, proxy: str):
         """Đặt proxy (http://host:port hoặc socks5://host:port)."""
@@ -183,9 +224,39 @@ class FacebookBackend:
         data = json.loads(path.read_text(encoding="utf-8"))
         return self._apply_cookies(data)
 
-    def save_cookies(self, path: Path):
+    def save_cookies(self, path: Path | None = None):
+        _ensure_data_dir()
+        path = path or COOKIES_FILE
         cookies = {c.name: c.value for c in self.session.cookies}
+        # Gộp cookie cùng tên (ưu tiên bản mới)
+        merged = {}
+        for c in self.session.cookies:
+            merged[c.name] = c.value
+        cookies = merged or cookies
         path.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+        # Giữ bản legacy để tương thích
+        try:
+            LEGACY_COOKIES_FILE.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def save_tokens(self, extra: dict | None = None):
+        """Lưu fb_dtsg / lsd gần nhất để mở tool nhanh hơn."""
+        data = dict(self._tokens_cache or {})
+        if extra:
+            data.update(extra)
+        data["saved_at"] = time.time()
+        data["user_id"] = self._get_user_id()
+        _write_json(TOKENS_FILE, {k: v for k, v in data.items() if v})
+
+    def load_saved_tokens(self) -> dict:
+        data = _read_json(TOKENS_FILE, {}) or {}
+        # Token cũ hơn 2h coi như hết hạn
+        if time.time() - float(data.get("saved_at") or 0) > 7200:
+            return {}
+        self._tokens_cache = {k: v for k, v in data.items() if k not in ("saved_at",)}
+        self._tokens_cache_time = float(data.get("saved_at") or time.time())
+        return self._tokens_cache
 
     def set_cookies_from_string(self, cookie_str: str) -> bool:
         cookies = {}
@@ -682,6 +753,10 @@ class FacebookBackend:
                 except Exception:
                     pass
 
+        # Token mới mỗi nhóm — tránh tái dùng session sau bài đầu
+        self._tokens_cache.clear()
+        self._tokens_cache_time = 0.0
+
         methods = [
             ("GraphQL", self._post_via_graphql),
             ("Ajax", self._post_via_ajax_feed),
@@ -713,9 +788,13 @@ class FacebookBackend:
                 m = re.search(r"\(([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})\)", msg)
             if m:
                 post_id = m.group(1)
-            # post_id trùng group_id → giả
-            if post_id and str(post_id) == str(group_id):
-                post_id = None
+            # post_id trùng group_id hoặc đã dùng cho nhóm khác → giả
+            if post_id and (
+                str(post_id) == str(group_id) or str(post_id) in self._used_post_ids
+            ):
+                _prog(f"{name}: post_id trùng/đã dùng ({str(post_id)[:20]}) → bỏ qua")
+                last_err = f"{name} trả post_id cũ — có thể FB chặn spam hoặc echo bài trước"
+                continue
 
             verified = None
             try:
@@ -727,11 +806,17 @@ class FacebookBackend:
                 verified = None
 
             if verified in ("published", "pending"):
+                if post_id:
+                    self._used_post_ids.add(str(post_id))
                 label = "Đã đăng lên nhóm" if verified == "published" else "Đang chờ admin duyệt"
                 extra = " (đã xác minh)"
                 if post_id:
                     extra = f" (post: {post_id[:28]}, đã xác minh)"
                 _prog(f"{name}: {label}{extra}")
+                try:
+                    self.save_tokens()
+                except Exception:
+                    pass
                 return verified, f"{label}{extra}"
 
             # Báo success nhưng không thấy bài → coi là thất bại, thử cách khác
@@ -745,16 +830,19 @@ class FacebookBackend:
 
     def _message_snippets(self, message: str) -> list[str]:
         """Đoạn text dùng để khớp bài trên feed/pending."""
-        snippet = re.sub(r"\s+", " ", (message or "").strip())
+        raw = message or ""
+        snippet = re.sub(r"\s+", " ", raw.strip())
         checks: list[str] = []
+        # Ưu tiên đuôi bài (chứa dấu ẩn unique từng nhóm)
+        if len(raw) >= 24:
+            checks.append(raw[-96:].lower())
         if len(snippet) >= 10:
             checks.append(snippet[:48].lower())
-        for line in (message or "").split("\n"):
+        for line in raw.split("\n"):
             line = re.sub(r"\s+", " ", line).strip()
             if len(line) >= 10 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
                 checks.append(line[:40].lower())
                 break
-        # Bỏ trùng
         return list(dict.fromkeys(c for c in checks if c))
 
     def _verify_post_status(
@@ -821,6 +909,7 @@ class FacebookBackend:
                 html = resp.text
                 low = html.lower()
                 final = resp.url.lower()
+                gid = str(group_id)
 
                 if "login" in final or "/login" in final:
                     continue
@@ -830,21 +919,43 @@ class FacebookBackend:
                 )):
                     continue
 
+                # Bắt buộc vẫn thuộc đúng nhóm (tránh redirect sang bài nhóm trước)
+                on_this_group = (
+                    f"/groups/{gid}" in final
+                    or f"id={gid}" in final
+                    or f"&id={gid}" in final
+                    or f"group_id={gid}" in final
+                )
+                if kind in ("by_id", "pending", "feed") and not on_this_group:
+                    # URL tuyệt đối /Uzpf... đôi khi không có group trong path —
+                    # chỉ chấp nhận nếu HTML chứa groups/{gid}
+                    if f"/groups/{gid}" not in low and f"groups\\/{gid}" not in low:
+                        continue
+
                 has_pid = bool(post_id and str(post_id) in html)
                 matched = any(c in low for c in checks) if checks else False
 
                 if kind == "by_id":
-                    # URL bài mở được + (có id hoặc khớp nội dung)
-                    if has_pid or matched:
-                        if "pending" in final or "pending" in low[:3000]:
+                    # Phải khớp nội dung HOẶC (pid + đúng nhóm) — không tin redirect mù
+                    if not on_this_group and f"/groups/{gid}" not in low:
+                        continue
+                    if has_pid and matched:
+                        if "pending" in final or "pending" in low[:3000] or claimed == "pending":
                             return "pending"
-                        if claimed == "pending":
+                        return "published"
+                    if has_pid and on_this_group:
+                        # Có post_id trên URL nhóm này; ưu tiên pending nếu claim
+                        if claimed == "pending" or "pending" in final or "pending" in low[:3000]:
+                            return "pending"
+                        return "published"
+                    if matched and on_this_group:
+                        if claimed == "pending" or "pending" in low[:3000]:
                             return "pending"
                         return "published"
                     continue
 
-                # feed / pending chung: bắt buộc khớp nội dung hoặc thấy post_id
-                if not matched and not has_pid:
+                # feed / pending: bắt buộc khớp nội dung bài (không chỉ banner chờ duyệt)
+                if not matched:
                     continue
 
                 if kind == "pending":
@@ -972,7 +1083,7 @@ class FacebookBackend:
                 "tracking": [None],
                 "audience": {"to_id": str(group_id)},
                 "actor_id": str(uid),
-                "client_mutation_id": str(uuid.uuid4().int % 100),
+                "client_mutation_id": str(uuid.uuid4()),
                 "logging": {"composer_session_id": sid},
             },
             "displayCommentsFeedbackContext": None,
@@ -999,7 +1110,9 @@ class FacebookBackend:
             "UFI2CommentsProvider_commentsKey": "CometGroupDiscussionRootSuccessQuery",
         }
 
-    def _analyze_post_response(self, text: str) -> tuple[str, str]:
+    def _analyze_post_response(
+        self, text: str, group_id: str | None = None
+    ) -> tuple[str, str]:
         """
         Phân tích phản hồi đăng bài.
         Returns: (status, message) — status = published|pending|failed|unknown
@@ -1009,6 +1122,7 @@ class FacebookBackend:
             text = text[9:]
 
         low = text.lower()
+        gid = str(group_id) if group_id else ""
 
         # Lỗi CRITICAL (bỏ qua WARNING relay)
         for chunk in text.split("\n"):
@@ -1052,31 +1166,39 @@ class FacebookBackend:
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
-            found, status = self._extract_created_post_id(data)
+            # Chỉ nhận id từ story_create — tránh echo bài cũ trên feed
+            found, status = self._walk_json_for_post(data, create_only=True)
             if found:
+                if found in self._used_post_ids or (gid and found == gid):
+                    continue
                 post_id = found
                 publish_status = status
                 break
-            # Tìm URL bài trong JSON (groups/.../posts/...)
             url_m = re.search(
-                r'https:\\?/\\?/www\.facebook\.com\\?/groups\\?/[^"\\]+\\?/(?:posts|permalink)\\?/[^"\\]+',
+                r'https:\\?/\\?/www\.facebook\.com\\?/groups\\?/([^"\\/]+)\\?/(?:posts|permalink)\\?/([^"\\/?]+)',
                 chunk,
             )
             if url_m:
+                url_gid, url_pid = url_m.group(1), url_m.group(2)
+                if gid and url_gid != gid:
+                    continue
+                if url_pid in self._used_post_ids:
+                    continue
                 story_url = url_m.group(0).replace("\\/", "/")
+                post_id = post_id or url_pid
 
         if not post_id:
             # Chỉ lấy id gần ngữ cảnh tạo bài — tránh id feed cũ
             for pat in (
-                r'"story_create"\s*:\s*\{.{0,800}?"legacy_story_hideable_id"\s*:\s*"(\d+)"',
-                r'"story_create"\s*:\s*\{.{0,800}?"post_id"\s*:\s*"(\d+)"',
+                r'"story_create"\s*:\s*\{.{0,1200}?"legacy_story_hideable_id"\s*:\s*"(\d+)"',
+                r'"story_create"\s*:\s*\{.{0,1200}?"post_id"\s*:\s*"(\d+)"',
                 r'"creation_story"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
                 r'"story_create"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
-                r'"legacy_story_hideable_id"\s*:\s*"(\d+)"',
-                r'"post_id"\s*:\s*"(\d+)"',
             ):
                 m = re.search(pat, text, re.S)
-                if m:
+                if m and m.group(1) not in self._used_post_ids:
+                    if gid and m.group(1) == gid:
+                        continue
                     post_id = m.group(1)
                     break
 
@@ -1153,10 +1275,11 @@ class FacebookBackend:
             photo_id = self._upload_photo(image_path, up_tokens)
 
         doc_ids = self._extract_composer_doc_ids(html)
-        variables = self._build_gql_variables(group_id, message, uid, photo_id)
         last_hint = ""
 
         for doc_id in doc_ids[:8]:
+            # Variables mới mỗi lần thử — tránh FB echo mutation cũ
+            variables = self._build_gql_variables(group_id, message, uid, photo_id)
             payload: dict = {
                 "av": uid,
                 "__user": uid,
@@ -1190,10 +1313,16 @@ class FacebookBackend:
                     headers=headers,
                     timeout=20,
                 )
-                status, msg = self._analyze_post_response(gql_resp.text)
+                status, msg = self._analyze_post_response(gql_resp.text, group_id=group_id)
                 if status in ("published", "pending"):
                     if photo_id:
                         msg = f"{msg} (+ảnh)"
+                    try:
+                        self._tokens_cache = {**tokens, "__user": uid, "fb_dtsg": fb_dtsg}
+                        self._tokens_cache_time = time.time()
+                        self.save_tokens()
+                    except Exception:
+                        pass
                     return status, msg
                 if status == "failed":
                     if any(k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin", "chỉ cho")):
@@ -1207,8 +1336,8 @@ class FacebookBackend:
 
         # Text-only retry nếu upload ảnh fail
         if photo_id:
-            variables = self._build_gql_variables(group_id, message, uid, None)
             for doc_id in doc_ids[:4]:
+                variables = self._build_gql_variables(group_id, message, uid, None)
                 payload = {
                     "av": uid, "__user": uid, "__a": "1", "__comet_req": "15",
                     "fb_dtsg": fb_dtsg,
@@ -1232,7 +1361,7 @@ class FacebookBackend:
                         },
                         timeout=20,
                     )
-                    status, msg = self._analyze_post_response(gql_resp.text)
+                    status, msg = self._analyze_post_response(gql_resp.text, group_id=group_id)
                     if status in ("published", "pending"):
                         return status, f"{msg} (chỉ text)"
                 except Exception:
@@ -1302,7 +1431,7 @@ class FacebookBackend:
                             },
                             timeout=15,
                         )
-                    status, msg = self._analyze_post_response(resp.text)
+                    status, msg = self._analyze_post_response(resp.text, group_id=group_id)
                     if status in ("published", "pending"):
                         return status, msg
                     # Ajax chỉ chấp nhận khi có post id thật (analyze đã lo)
@@ -1461,7 +1590,7 @@ class FacebookBackend:
                         resp = self.session.post(
                             post_url, data=data, allow_redirects=True, timeout=15,
                         )
-                    status, msg = self._analyze_post_response(resp.text)
+                    status, msg = self._analyze_post_response(resp.text, group_id=group_id)
                     if status in ("published", "pending"):
                         return status, msg
                     # Chỉ nhận nếu URL redirect có post id thật
@@ -1541,7 +1670,7 @@ class FacebookBackend:
                     post_url, data=fields, allow_redirects=True, timeout=12,
                 )
 
-            status, msg = self._analyze_post_response(post_resp.text)
+            status, msg = self._analyze_post_response(post_resp.text, group_id=group_id)
             if status in ("published", "pending"):
                 return status, msg
             if status == "failed" and msg:
@@ -1610,7 +1739,7 @@ class FacebookBackend:
                 post_resp = self.session.post(
                     post_url, data=fields, allow_redirects=True, timeout=12
                 )
-                status, msg = self._analyze_post_response(post_resp.text)
+                status, msg = self._analyze_post_response(post_resp.text, group_id=group_id)
                 if status in ("published", "pending"):
                     return status, msg
                 pid = re.search(
@@ -1713,7 +1842,7 @@ class FacebookBackend:
                     post_url, data=fields, allow_redirects=True, timeout=15,
                 )
 
-            status, msg = self._analyze_post_response(post_resp.text)
+            status, msg = self._analyze_post_response(post_resp.text, group_id=group_id)
             if status in ("published", "pending"):
                 return status, msg
             pid_m = re.search(
@@ -1910,13 +2039,13 @@ class LogBox(scrolledtext.ScrolledText):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        _ensure_data_dir()
         self.title(f"{APP_TITLE} v{APP_VERSION}")
         self.geometry("1120x760")
         self.minsize(960, 660)
         self.configure(bg=COLOR_BG)
         self.resizable(True, True)
 
-        # Try to set icon (works when bundled with PyInstaller)
         try:
             if getattr(sys, "frozen", False):
                 base = sys._MEIPASS
@@ -1933,20 +2062,144 @@ class App(tk.Tk):
         self.selected_groups: list[dict] = []
         self._posting = False
         self._stop_flag = False
+        self._draft_save_job = None
 
-        # Load saved cookies on startup
-        self._auto_login()
+        # UI trước — mở nhanh; cookies/nhóm/nháp load nền
         self._build_ui()
+        self.after(50, self._bootstrap_saved_data)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _bootstrap_saved_data(self):
+        """Load cookies / nhóm / nháp sau khi UI đã hiện."""
+        def _bg():
+            cookies_ok = False
+            if COOKIES_FILE.exists():
+                cookies_ok = self.backend.load_cookies(COOKIES_FILE)
+            elif LEGACY_COOKIES_FILE.exists():
+                cookies_ok = self.backend.load_cookies(LEGACY_COOKIES_FILE)
+                if cookies_ok:
+                    try:
+                        self.backend.save_cookies(COOKIES_FILE)
+                    except Exception:
+                        pass
+            if cookies_ok:
+                self.backend.load_saved_tokens()
+                self.after(0, self._on_login_success_ui)
+                def _check():
+                    valid, msg = self.backend.verify_session()
+                    if valid:
+                        self.after(0, self._on_login_success_ui)
+                        try:
+                            self.backend.save_tokens()
+                        except Exception:
+                            pass
+                    else:
+                        self.after(0, lambda: self._status_var.set(f"● {msg}"))
+                threading.Thread(target=_check, daemon=True).start()
+
+            groups = _read_json(GROUPS_FILE, [])
+            if isinstance(groups, list) and groups:
+                self.after(0, lambda: self._restore_groups(groups))
+
+            draft = _read_json(DRAFT_FILE, {}) or {}
+            if draft:
+                self.after(0, lambda: self._restore_draft(draft))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _restore_groups(self, groups: list):
+        self.groups = groups
+        self._on_groups_loaded(groups)
+        self._log(f"Đã tải {len(groups)} nhóm đã lưu", "ok")
+
+    def _restore_draft(self, draft: dict):
+        msg = draft.get("message") or ""
+        if msg and hasattr(self, "_msg_text"):
+            self._msg_text.delete("1.0", "end")
+            self._msg_text.insert("1.0", msg)
+        img = draft.get("image") or ""
+        if img and Path(img).is_file() and hasattr(self, "_image_var"):
+            self._image_var.set(img)
+        delay = draft.get("delay")
+        if delay is not None and hasattr(self, "_delay_var"):
+            try:
+                self._delay_var.set(float(delay))
+            except Exception:
+                pass
+
+    def _persist_groups(self):
+        try:
+            _write_json(GROUPS_FILE, self.groups)
+        except Exception:
+            pass
+
+    def _persist_draft(self, copy_image: bool = False):
+        try:
+            message = ""
+            if hasattr(self, "_msg_text"):
+                message = self._msg_text.get("1.0", "end").rstrip("\n")
+            image = ""
+            if hasattr(self, "_image_var"):
+                image = self._image_var.get().strip()
+            if copy_image and image and Path(image).is_file():
+                image = self._cache_image(image)
+                self._image_var.set(image)
+            delay = 20.0
+            if hasattr(self, "_delay_var"):
+                try:
+                    delay = float(self._delay_var.get())
+                except Exception:
+                    pass
+            _write_json(DRAFT_FILE, {
+                "message": message,
+                "image": image,
+                "delay": delay,
+                "saved_at": time.time(),
+            })
+        except Exception:
+            pass
+
+    def _cache_image(self, image_path: str) -> str:
+        """Copy ảnh vào ~/.fb_poster/images để mở lại tool vẫn còn."""
+        src = Path(image_path)
+        if not src.is_file():
+            return image_path
+        _ensure_data_dir()
+        # Giữ nếu đã nằm trong thư mục cache
+        try:
+            if src.resolve().parent == IMAGES_DIR.resolve():
+                return str(src)
+        except Exception:
+            pass
+        dest = IMAGES_DIR / f"draft_{int(time.time())}_{src.name}"
+        try:
+            shutil.copy2(src, dest)
+            return str(dest)
+        except Exception:
+            return image_path
+
+    def _schedule_draft_save(self, *_args):
+        if self._draft_save_job:
+            try:
+                self.after_cancel(self._draft_save_job)
+            except Exception:
+                pass
+        self._draft_save_job = self.after(800, self._persist_draft)
+
+    def _on_close(self):
+        self._persist_draft(copy_image=True)
+        self._persist_groups()
+        try:
+            if self.backend.logged_in:
+                self.backend.save_cookies()
+                self.backend.save_tokens()
+        except Exception:
+            pass
+        self.destroy()
 
     def _auto_login(self):
-        if COOKIES_FILE.exists() and self.backend.load_cookies(COOKIES_FILE):
-            def _check():
-                valid, msg = self.backend.verify_session()
-                if valid:
-                    self.after(0, self._on_login_success_ui)
-                else:
-                    self.after(0, lambda: self._status_var.set(f"● {msg}"))
-            threading.Thread(target=_check, daemon=True).start()
+        # Giữ tương thích — bootstrap đã lo
+        pass
 
     # ── UI BUILD ──────────────────────────────────────────────────────────────
 
@@ -2324,9 +2577,10 @@ class App(tk.Tk):
 
     def _on_groups_loaded(self, groups: list[dict]):
         self.groups = groups
+        self._persist_groups()
         if groups:
-            self._scan_progress_var.set(f"✅ Quét xong — tìm thấy {len(groups)} nhóm")
-            self._log(f"Quét xong: {len(groups)} nhóm", "ok")
+            self._scan_progress_var.set(f"✅ Quét xong — tìm thấy {len(groups)} nhóm (đã lưu)")
+            self._log(f"Quét xong: {len(groups)} nhóm — đã lưu tự động", "ok")
         else:
             self._scan_progress_var.set(
                 "⚠️ Không tìm thấy nhóm nào — Facebook thay đổi giao diện, hãy thêm thủ công bên dưới"
@@ -2442,6 +2696,7 @@ class App(tk.Tk):
 
         self.groups.append({"id": gid, "name": name})
         self._render_group_list()
+        self._persist_groups()
         self._manual_id_var.set("")
         self._manual_name_var.set("")
         self._log(f"Đã thêm nhóm thủ công: {name} ({gid})", "ok")
@@ -2481,6 +2736,7 @@ class App(tk.Tk):
             font=("Segoe UI", 12), wrap=tk.WORD, padx=10, pady=8,
         )
         self._msg_text.pack(fill="both", expand=True)
+        self._msg_text.bind("<KeyRelease>", self._schedule_draft_save)
 
         # Image
         img_row = tk.Frame(left, bg=COLOR_PANEL)
@@ -2508,15 +2764,20 @@ class App(tk.Tk):
         delay_row.pack(fill="x", pady=(12, 4))
         tk.Label(delay_row, text="Delay (giây)", bg=COLOR_PANEL,
                  fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
-        self._delay_var = tk.DoubleVar(value=15)
+        self._delay_var = tk.DoubleVar(value=25)
         delay_spin = tk.Spinbox(
-            delay_row, from_=5, to=300, textvariable=self._delay_var,
+            delay_row, from_=8, to=300, textvariable=self._delay_var,
             width=5, bg="#FFFFFF", fg=COLOR_INPUT_FG, relief="solid",
             font=("Segoe UI", 12), buttonbackground=COLOR_SURFACE,
             insertbackground=COLOR_TEXT, highlightthickness=1,
             highlightbackground=COLOR_BORDER,
+            command=self._schedule_draft_save,
         )
         delay_spin.pack(side="left", padx=(10, 4), ipady=4)
+        tk.Label(
+            delay_row, text="(≥25s tránh FB chặn spam)",
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
+        ).pack(side="left", padx=(4, 0))
 
         self._elapsed_var = tk.StringVar(value="⏱ Thời gian: 00:00")
         tk.Label(
@@ -2612,7 +2873,20 @@ class App(tk.Tk):
             title="Chọn ảnh đính kèm",
         )
         if path:
-            self._image_var.set(path)
+            cached = self._cache_image(path)
+            self._image_var.set(cached)
+            self._persist_draft()
+            self._log(f"Đã lưu ảnh: {cached}", "ok")
+
+    def _unique_message(self, message: str, group_id: str) -> str:
+        """
+        Thêm dấu ẩn (zero-width) riêng mỗi nhóm.
+        Giúp tránh FB coi là spam trùng + tránh xác minh nhầm bài nhóm trước.
+        """
+        seed = f"{group_id}-{uuid.uuid4().hex[:8]}"
+        bits = "".join(f"{ord(c):08b}" for c in seed[:10])
+        zw = "".join("\u200b" if b == "0" else "\u200c" for b in bits)
+        return message.rstrip() + zw
 
     def _get_selected_groups(self) -> list[dict]:
         return [g for var, g in self._group_vars if var.get()]
@@ -2652,7 +2926,16 @@ class App(tk.Tk):
             return
 
         image = self._image_var.get().strip() or None
+        if image:
+            image = self._cache_image(image)
+            self._image_var.set(image)
         delay = float(self._delay_var.get())
+        if delay < 15:
+            delay = 15.0
+            self._delay_var.set(delay)
+
+        self._persist_draft(copy_image=True)
+        self.backend.reset_batch_state()
 
         self._posting = True
         self._stop_flag = False
@@ -2670,7 +2953,7 @@ class App(tk.Tk):
         self._tick_timer()
 
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
-        self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
+        self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi — mỗi nhóm dùng post_id riêng", "info")
 
         def _worker():
             ok_count = 0
@@ -2685,6 +2968,8 @@ class App(tk.Tk):
                 gname = g.get("name", gid)
                 n = idx + 1
                 t = len(groups)
+                # Nội dung có dấu ẩn riêng từng nhóm
+                msg_for_group = self._unique_message(message, gid)
 
                 def _prog(msg, _n=n, _t=t, _name=gname, _gid=gid):
                     self.after(
@@ -2699,7 +2984,7 @@ class App(tk.Tk):
 
                 try:
                     status, msg_result = self.backend.post_to_group(
-                        gid, message, image, progress_cb=_prog
+                        gid, msg_for_group, image, progress_cb=_prog
                     )
                 except Exception as exc:
                     status, msg_result = "failed", str(exc)
@@ -2726,10 +3011,12 @@ class App(tk.Tk):
                 )
 
                 if idx < len(groups) - 1 and not self._stop_flag:
-                    for sec in range(int(delay)):
+                    # Delay tăng dần nhẹ sau mỗi nhóm để giảm spam block
+                    wait_s = int(delay) + min(idx * 2, 20)
+                    for sec in range(wait_s):
                         if self._stop_flag:
                             break
-                        left = int(delay) - sec
+                        left = wait_s - sec
                         self.after(
                             0,
                             lambda l=left: self._status_line.set(f"Chờ {l}s rồi đăng nhóm tiếp…"),
@@ -2895,6 +3182,32 @@ class App(tk.Tk):
             font=("Segoe UI", 10), padx=10, pady=5,
         ).pack(side="left", padx=(6, 0))
 
+        # ── Dữ liệu đã lưu ────────────────────────────────────────────────
+        data_card = tk.LabelFrame(
+            outer, text="  Dữ liệu đã lưu (tự động)  ",
+            bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 11, "bold"),
+            bd=1, relief="groove", padx=16, pady=12,
+        )
+        data_card.pack(fill="x", pady=(0, 16))
+        tk.Label(
+            data_card,
+            text=(
+                f"Thư mục: {DATA_DIR}\n"
+                "• cookies.json — token/cookies đăng nhập\n"
+                "• tokens.json — fb_dtsg gần nhất (mở nhanh hơn)\n"
+                "• groups.json — nhóm đã quét\n"
+                "• draft.json + images/ — nội dung bài & ảnh"
+            ),
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 10),
+            justify="left",
+        ).pack(anchor="w")
+        HoverButton(
+            data_card, text="💾  Lưu ngay cookies + nhóm + bài nháp",
+            command=self._save_all_now,
+            bg=COLOR_BUTTON, fg="white", relief="flat", cursor="hand2",
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6,
+        ).pack(anchor="w", pady=(10, 0))
+
         self._proxy_status_var = tk.StringVar(value="")
         tk.Label(proxy_card, textvariable=self._proxy_status_var,
                  bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
@@ -2923,6 +3236,22 @@ class App(tk.Tk):
             color = COLOR_WARNING if h.startswith("👉") else (COLOR_SUCCESS if h.startswith("   •") else COLOR_TEXT_DIM)
             tk.Label(hint_card, text=h, bg=COLOR_PANEL, fg=color,
                      font=("Segoe UI", 9), anchor="w", justify="left").pack(anchor="w")
+
+    def _save_all_now(self):
+        try:
+            _ensure_data_dir()
+            if self.backend.logged_in:
+                self.backend.save_cookies()
+                self.backend.save_tokens()
+            self._persist_groups()
+            self._persist_draft(copy_image=True)
+            messagebox.showinfo(
+                "Đã lưu",
+                f"Đã lưu vào:\n{DATA_DIR}\n\n"
+                f"Cookies, token, {len(self.groups)} nhóm, bài nháp & ảnh.",
+            )
+        except Exception as exc:
+            messagebox.showerror("Lỗi lưu", str(exc))
 
     def _check_connection(self):
         self._net_status_var.set("🔄 Đang kiểm tra…")
