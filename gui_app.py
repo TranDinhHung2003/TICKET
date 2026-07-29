@@ -24,7 +24,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -409,6 +409,35 @@ class FacebookBackend:
                 return True, "Đăng nhập thành công!"
 
             # Kiểm tra thông báo lỗi từ Facebook
+            body_l = login_resp.text.lower()
+            wrong_pw = any(
+                k in body_l
+                for k in (
+                    "password you entered is incorrect",
+                    "incorrect password",
+                    "wrong password",
+                    "mật khẩu bạn đã nhập không chính xác",
+                    "mật khẩu không đúng",
+                    "sai mật khẩu",
+                    "login_error",
+                    "identifiermismatch",
+                    "invalid username or password",
+                    "email hoặc số điện thoại bạn nhập không khớp",
+                    "the email or mobile number you entered isn't connected",
+                    "không khớp với tài khoản nào",
+                )
+            )
+            if wrong_pw or re.search(
+                r"(incorrect|wrong).{0,20}password|mật khẩu.{0,30}(sai|không đúng|không chính xác)",
+                login_resp.text,
+                re.I,
+            ):
+                return False, (
+                    "Sai tài khoản hoặc mật khẩu.\n\n"
+                    "Kiểm tra lại email/SĐT và mật khẩu Facebook.\n"
+                    "Hoặc dùng tab 'Nhập Cookies' (khuyến nghị)."
+                )
+
             error_patterns = [
                 r'id="error_box"[^>]*>([^<]+)',
                 r'class="[^"]*error[^"]*"[^>]*>\s*<[^>]+>\s*([^<]{5,100})',
@@ -418,12 +447,18 @@ class FacebookBackend:
             for pat in error_patterns:
                 m = re.search(pat, login_resp.text, re.I)
                 if m:
-                    return False, f"Lỗi: {m.group(0)[:120]}"
+                    snippet = re.sub(r"<[^>]+>", "", m.group(0))[:120]
+                    low = snippet.lower()
+                    if any(k in low for k in ("password", "mật khẩu", "incorrect", "sai")):
+                        return False, (
+                            "Sai tài khoản hoặc mật khẩu.\n\n"
+                            "Kiểm tra lại email/SĐT và mật khẩu Facebook."
+                        )
+                    return False, f"Lỗi: {snippet}"
 
             return False, (
-                "Đăng nhập thất bại.\n"
-                "Facebook có thể đang chặn đăng nhập tự động.\n"
-                "Vui lòng dùng tab 'Nhập Cookies' thay thế."
+                "Sai tài khoản hoặc mật khẩu — hoặc Facebook chặn đăng nhập tự động.\n\n"
+                "Thử lại đúng email/mật khẩu, hoặc dùng tab 'Nhập Cookies'."
             )
         except Exception as exc:
             return False, f"Lỗi kết nối: {exc}"
@@ -2398,12 +2433,143 @@ class HoverButton(tk.Button):
             pass
 
 
+class RoundedButton(tk.Canvas):
+    """Nút bo tròn thật (canvas) — dùng cho Bắt đầu / Dừng."""
+
+    def __init__(
+        self,
+        master,
+        text="",
+        command=None,
+        bg=None,
+        fg="#FFFFFF",
+        hover_bg=None,
+        disabled_bg="#FDBA74",
+        disabled_fg="#FFF7ED",
+        radius=18,
+        font=None,
+        padx=28,
+        pady=14,
+        outline=None,
+        **_kw,
+    ):
+        parent_bg = master.cget("bg") if master else COLOR_BG
+        super().__init__(master, bg=parent_bg, highlightthickness=0, bd=0, cursor="hand2")
+        self._text = text
+        self._command = command
+        self._bg = bg or COLOR_BUTTON
+        self._fg = fg
+        self._hover_bg = hover_bg or COLOR_BUTTON_HOVER
+        self._disabled_bg = disabled_bg
+        self._disabled_fg = disabled_fg
+        self._radius = radius
+        self._font = font or ("Segoe UI", 13, "bold")
+        self._padx = padx
+        self._pady = pady
+        self._outline = outline or self._bg
+        self._state = "normal"
+        self._hover = False
+        self._shape = None
+        self._label = None
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.after_idle(self._measure_and_draw)
+
+    def _measure_and_draw(self):
+        try:
+            tmp = self.create_text(0, 0, text=self._text, font=self._font, anchor="nw")
+            bbox = self.bbox(tmp)
+            self.delete(tmp)
+            tw = (bbox[2] - bbox[0]) if bbox else 80
+            th = (bbox[3] - bbox[1]) if bbox else 20
+            w = tw + self._padx * 2
+            h = th + self._pady * 2
+            self.configure(width=w, height=h)
+        except Exception:
+            self.configure(width=180, height=48)
+        self._draw()
+
+    def _fill(self):
+        if self._state == "disabled":
+            return self._disabled_bg
+        return self._hover_bg if self._hover else self._bg
+
+    def _text_color(self):
+        if self._state == "disabled":
+            return self._disabled_fg
+        return self._fg
+
+    def _draw(self):
+        self.delete("all")
+        w = max(self.winfo_width(), 40)
+        h = max(self.winfo_height(), 28)
+        fill = self._fill()
+        outline = fill if self._state == "disabled" else (self._outline or fill)
+        self._shape = _round_rect(
+            self, 1, 1, w - 2, h - 2,
+            r=min(self._radius, h // 2),
+            fill=fill, outline=outline, width=1.5, tags="btn",
+        )
+        self._label = self.create_text(
+            w // 2, h // 2, text=self._text, fill=self._text_color(),
+            font=self._font, tags="btn",
+        )
+
+    def _on_enter(self, _e=None):
+        if self._state == "disabled":
+            return
+        self._hover = True
+        self._draw()
+
+    def _on_leave(self, _e=None):
+        self._hover = False
+        self._draw()
+
+    def _on_click(self, _e=None):
+        if self._state == "disabled" or not self._command:
+            return
+        self._command()
+
+    def config(self, **kw):
+        redraw = False
+        if "state" in kw:
+            self._state = str(kw.pop("state"))
+            self.configure(cursor="" if self._state == "disabled" else "hand2")
+            redraw = True
+        if "text" in kw:
+            self._text = kw.pop("text")
+            redraw = True
+        if "command" in kw:
+            self._command = kw.pop("command")
+        if "bg" in kw:
+            self._bg = kw.pop("bg")
+            redraw = True
+        if "fg" in kw:
+            self._fg = kw.pop("fg")
+            redraw = True
+        if kw:
+            super().configure(**kw)
+        if redraw:
+            self.after_idle(self._measure_and_draw)
+
+    configure = config
+
+    def cget(self, key):
+        if key == "state":
+            return self._state
+        if key == "text":
+            return self._text
+        return super().cget(key)
+
+
 class SoftEntry(tk.Frame):
     """Ô nhập bo góc giả lập bằng viền cam nhạt."""
 
     def __init__(self, master, textvariable=None, width=30, show=None, **kw):
         super().__init__(
-            master, bg=COLOR_BORDER, padx=1, pady=1,
+            master, bg=COLOR_BORDER, padx=2, pady=2,
             highlightthickness=0,
         )
         self.entry = tk.Entry(
@@ -2411,7 +2577,7 @@ class SoftEntry(tk.Frame):
             bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
             relief="flat", font=("Segoe UI", 11), bd=0,
         )
-        self.entry.pack(fill="both", expand=True, padx=8, pady=6)
+        self.entry.pack(fill="both", expand=True, padx=10, pady=8)
 
 
 class Card(RoundedFrame):
@@ -2682,11 +2848,11 @@ class App(tk.Tk):
         tk.Label(logo_frame, text=f"  v{APP_VERSION}", bg=COLOR_HEADER, fg="#FFEDD5",
                  font=("Segoe UI", 9)).pack(side="left", pady=(6, 0))
 
-        status_frame = tk.Frame(header, bg="#EA580C", padx=14, pady=6)
-        status_frame.pack(side="right", padx=20, pady=12)
+        status_frame = tk.Frame(header, bg="#C2410C", padx=16, pady=8)
+        status_frame.pack(side="right", padx=20, pady=14)
         self._status_var = tk.StringVar(value="○ Chưa đăng nhập")
-        tk.Label(status_frame, textvariable=self._status_var, bg="#EA580C",
-                 fg=COLOR_HEADER_TEXT, font=("Segoe UI", 10)).pack()
+        tk.Label(status_frame, textvariable=self._status_var, bg="#C2410C",
+                 fg=COLOR_HEADER_TEXT, font=("Segoe UI", 10, "bold")).pack()
 
         style = ttk.Style(self)
         style.theme_use("clam")
@@ -2770,16 +2936,14 @@ class App(tk.Tk):
                      font=("Segoe UI", 10)).grid(row=r, column=0, sticky="w", pady=4)
 
         lbl(pane_pw, "Email:", 0)
-        email_entry = tk.Entry(pane_pw, textvariable=self._email_var, width=36,
-                               bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
-                               relief="flat", font=("Segoe UI", 11))
-        email_entry.grid(row=0, column=1, padx=(8, 0), pady=4, ipady=6)
+        SoftEntry(pane_pw, textvariable=self._email_var, width=36).grid(
+            row=0, column=1, padx=(8, 0), pady=6, sticky="ew"
+        )
 
         lbl(pane_pw, "Mật khẩu:", 1)
-        pass_entry = tk.Entry(pane_pw, textvariable=self._pass_var, show="●", width=36,
-                              bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
-                              relief="flat", font=("Segoe UI", 11))
-        pass_entry.grid(row=1, column=1, padx=(8, 0), pady=4, ipady=6)
+        SoftEntry(pane_pw, textvariable=self._pass_var, width=36, show="●").grid(
+            row=1, column=1, padx=(8, 0), pady=6, sticky="ew"
+        )
 
         self._login_btn = HoverButton(
             pane_pw, text="  Đăng nhập  ", command=self._do_login,
@@ -2838,18 +3002,27 @@ class App(tk.Tk):
             self._on_login_success_ui()
         else:
             self._login_status.config(text=f"❌ {msg}", fg=COLOR_ERROR)
-            # Nếu lỗi liên quan tới form/block, gợi ý dùng cookies
-            if "checkpoint" in msg or "chặn" in msg or "thất bại" in msg or "form" in msg:
+            low = msg.lower()
+            if "sai tài khoản" in low or "mật khẩu" in low:
+                messagebox.showerror(
+                    "Sai tài khoản hoặc mật khẩu",
+                    "Tài khoản hoặc mật khẩu Facebook không đúng.\n\n"
+                    "• Kiểm tra lại email / số điện thoại và mật khẩu\n"
+                    "• Tắt Caps Lock nếu đang bật\n"
+                    "• Hoặc dùng tab 'Nhập Cookies' (ổn định hơn)",
+                )
+            elif "checkpoint" in low or "chặn" in low or "cookies" in low:
                 messagebox.showinfo(
                     "Gợi ý: Dùng Cookies",
                     "Đăng nhập bằng email/mật khẩu thất bại.\n\n"
                     "👉 Hãy dùng tab 'Nhập Cookies':\n\n"
                     "1. Mở Chrome, đăng nhập Facebook bình thường\n"
                     "2. Cài extension 'Cookie-Editor' (miễn phí)\n"
-                    "   https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm\n"
                     "3. Mở extension → Export → Header String → Copy\n"
                     "4. Quay lại tab 'Nhập Cookies' → Dán vào ô → Xác nhận",
                 )
+            else:
+                messagebox.showerror("Đăng nhập thất bại", msg)
 
     def _do_set_cookies(self):
         cookie_str = self._cookie_text.get("1.0", "end").strip()
@@ -3172,8 +3345,9 @@ class App(tk.Tk):
         left_wrap.pack(side="left", fill="both", expand=True, padx=(14, 8), pady=12)
 
         left_card = tk.Frame(
-            left_wrap, bg=COLOR_PANEL, highlightbackground=COLOR_BORDER,
-            highlightthickness=1, padx=18, pady=16,
+            left_wrap, bg=COLOR_PANEL,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            highlightcolor=COLOR_ACCENT, padx=20, pady=18,
         )
         left_card.pack(fill="both", expand=True)
         left = left_card
@@ -3184,7 +3358,7 @@ class App(tk.Tk):
             left,
             text=(
                 "✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi\n"
-                "Spin: {Câu A|Câu B|Câu C} — mỗi nhóm chọn ngẫu nhiên, không trùng 100%"
+                "Spin chữ: {Câu A|Câu B|Câu C}  •  Spin ảnh: mỗi nhóm 1 tấm khác nhau"
             ),
             bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10),
             justify="left",
@@ -3193,20 +3367,20 @@ class App(tk.Tk):
         tk.Label(left, text="Nội dung", bg=COLOR_PANEL, fg=COLOR_TEXT,
                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
 
-        msg_frame = tk.Frame(left, bg=COLOR_BORDER, padx=1, pady=1)
+        msg_frame = tk.Frame(left, bg=COLOR_BORDER, padx=2, pady=2)
         msg_frame.pack(fill="both", expand=True, pady=(6, 12))
         self._msg_text = scrolledtext.ScrolledText(
-            msg_frame, height=11, bg="#FFFFFF", fg=COLOR_INPUT_FG,
+            msg_frame, height=10, bg="#FFFFFF", fg=COLOR_INPUT_FG,
             insertbackground=COLOR_TEXT, relief="flat",
-            font=("Segoe UI", 12), wrap=tk.WORD, padx=10, pady=8,
+            font=("Segoe UI", 12), wrap=tk.WORD, padx=12, pady=10,
         )
         self._msg_text.pack(fill="both", expand=True)
         self._msg_text.bind("<KeyRelease>", self._schedule_draft_save)
 
-        # Images — hỗ trợ spin 3–4 tấm
+        # Images — spin nhiều tấm chống spam
         img_label_row = tk.Frame(left, bg=COLOR_PANEL)
         img_label_row.pack(fill="x", pady=(4, 0))
-        tk.Label(img_label_row, text="Ảnh đính kèm (spin 3–4 tấm)", bg=COLOR_PANEL,
+        tk.Label(img_label_row, text="Ảnh đính kèm (spin nhiều tấm)", bg=COLOR_PANEL,
                  fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
         self._img_count_var = tk.StringVar(value="Chưa chọn ảnh")
         tk.Label(
@@ -3215,27 +3389,27 @@ class App(tk.Tk):
         ).pack(side="right")
 
         img_row = tk.Frame(left, bg=COLOR_PANEL)
-        img_row.pack(fill="x", pady=4)
+        img_row.pack(fill="x", pady=6)
 
         self._image_paths: list[str] = []
         self._image_var = tk.StringVar()
-        img_box = SoftEntry(img_row, textvariable=self._image_var, width=34)
-        img_box.pack(side="left", padx=(0, 6))
+        img_box = SoftEntry(img_row, textvariable=self._image_var, width=32)
+        img_box.pack(side="left", padx=(0, 6), fill="x", expand=True)
 
         HoverButton(
-            img_row, text="  Chọn ảnh  ", command=self._browse_image,
+            img_row, text="  Chọn nhiều ảnh  ", command=self._browse_image,
             bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
-            font=("Segoe UI", 10, "bold"), padx=10, pady=6,
+            font=("Segoe UI", 10, "bold"), padx=12, pady=8,
         ).pack(side="left")
         HoverButton(
             img_row, text=" +Thêm ", command=self._browse_image_add,
             bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
-            font=("Segoe UI", 10, "bold"), padx=8, pady=6,
-        ).pack(side="left", padx=2)
+            font=("Segoe UI", 10, "bold"), padx=10, pady=8,
+        ).pack(side="left", padx=3)
         HoverButton(
             img_row, text=" Xóa ", command=self._clear_images,
             bg="#FEE2E2", fg=COLOR_ERROR, hover_bg="#FECACA",
-            font=("Segoe UI", 10, "bold"), padx=8, pady=6,
+            font=("Segoe UI", 10, "bold"), padx=10, pady=8,
         ).pack(side="left", padx=2)
 
         spin_row = tk.Frame(left, bg=COLOR_PANEL)
@@ -3251,11 +3425,11 @@ class App(tk.Tk):
                 command=self._schedule_draft_save,
             ).pack(side="left", padx=(8, 0))
         tk.Label(
-            spin_row, text="(nên 3–4 ảnh khác nhau)",
+            spin_row, text="(nhóm 1→ảnh1, nhóm 2→ảnh2… tránh spam)",
             bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 8),
         ).pack(side="left", padx=(10, 0))
 
-        # Delay + timer row
+        # Delay + elapsed
         delay_row = tk.Frame(left, bg=COLOR_PANEL)
         delay_row.pack(fill="x", pady=(12, 4))
         tk.Label(delay_row, text="Delay (giây)", bg=COLOR_PANEL,
@@ -3263,13 +3437,13 @@ class App(tk.Tk):
         self._delay_var = tk.DoubleVar(value=25)
         delay_spin = tk.Spinbox(
             delay_row, from_=8, to=300, textvariable=self._delay_var,
-            width=5, bg="#FFFFFF", fg=COLOR_INPUT_FG, relief="solid",
-            font=("Segoe UI", 12), buttonbackground=COLOR_SURFACE,
+            width=5, bg="#FFFFFF", fg=COLOR_INPUT_FG, relief="flat",
+            font=("Segoe UI", 12, "bold"), buttonbackground=COLOR_SURFACE,
             insertbackground=COLOR_TEXT, highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
+            highlightbackground=COLOR_BORDER, highlightcolor=COLOR_ACCENT,
             command=self._schedule_draft_save,
         )
-        delay_spin.pack(side="left", padx=(10, 4), ipady=4)
+        delay_spin.pack(side="left", padx=(10, 4), ipady=5)
         tk.Label(
             delay_row, text="(≥25s tránh FB chặn spam)",
             bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
@@ -3281,28 +3455,32 @@ class App(tk.Tk):
             bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 12, "bold"),
         ).pack(side="right")
 
-        # Buttons
+        # Start / Stop — to, bo tròn
         btn_row = tk.Frame(left, bg=COLOR_PANEL)
-        btn_row.pack(fill="x", pady=(14, 4))
+        btn_row.pack(fill="x", pady=(16, 6))
 
-        self._post_btn = HoverButton(
-            btn_row, text="  🚀  Bắt đầu đăng bài  ", command=self._start_posting,
-            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 13, "bold"),
-            padx=28, pady=12,
+        self._post_btn = RoundedButton(
+            btn_row, text="🚀  Bắt đầu đăng bài", command=self._start_posting,
+            bg=COLOR_BUTTON, fg="#FFFFFF", hover_bg=COLOR_BUTTON_HOVER,
+            radius=20, font=("Segoe UI", 14, "bold"), padx=32, pady=16,
         )
-        self._post_btn.pack(side="left", padx=(0, 10))
+        self._post_btn.pack(side="left", padx=(0, 12))
 
-        self._stop_btn = HoverButton(
-            btn_row, text="  ⏹  Dừng  ", command=self._stop_posting,
+        self._stop_btn = RoundedButton(
+            btn_row, text="⏹  Dừng", command=self._stop_posting,
             bg="#FFFFFF", fg=COLOR_ERROR, hover_bg="#FEE2E2",
-            font=("Segoe UI", 12, "bold"), padx=18, pady=12, state="disabled",
+            disabled_bg="#F5F5F4", disabled_fg="#A8A29E",
+            outline=COLOR_ERROR, radius=20,
+            font=("Segoe UI", 14, "bold"), padx=28, pady=16,
         )
         self._stop_btn.pack(side="left")
+        self._stop_btn.config(state="disabled")
 
         # Right progress panel
         right = tk.Frame(
-            tab, bg=COLOR_PANEL, width=300,
+            tab, bg=COLOR_PANEL, width=320,
             highlightbackground=COLOR_BORDER, highlightthickness=1,
+            highlightcolor=COLOR_ACCENT,
         )
         right.pack(side="right", fill="y", padx=(0, 14), pady=12)
         right.pack_propagate(False)
@@ -3313,27 +3491,46 @@ class App(tk.Tk):
         self._status_line = tk.StringVar(value="Chưa chạy")
         tk.Label(
             right, textvariable=self._status_line, bg=COLOR_PANEL,
-            fg=COLOR_TEXT_DIM, font=("Segoe UI", 10), wraplength=260, justify="left",
+            fg=COLOR_TEXT_DIM, font=("Segoe UI", 10), wraplength=280, justify="left",
         ).pack(padx=14, anchor="w")
+
+        # Countdown delay lớn, rõ
+        cd_frame = tk.Frame(right, bg=COLOR_SURFACE, padx=12, pady=10)
+        cd_frame.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Label(
+            cd_frame, text="Đếm ngược delay", bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
+        ).pack(anchor="w")
+        self._countdown_var = tk.StringVar(value="—")
+        self._countdown_lbl = tk.Label(
+            cd_frame, textvariable=self._countdown_var, bg=COLOR_SURFACE,
+            fg=COLOR_ACCENT2, font=("Segoe UI", 28, "bold"),
+        )
+        self._countdown_lbl.pack(anchor="w")
+        self._countdown_hint = tk.StringVar(value="Chờ giữa các nhóm")
+        tk.Label(
+            cd_frame, textvariable=self._countdown_hint, bg=COLOR_SURFACE,
+            fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
+        ).pack(anchor="w")
 
         style = ttk.Style()
         style.configure(
             "Accent.Horizontal.TProgressbar",
             troughcolor="#FFEDD5", background=COLOR_ACCENT,
             borderwidth=0, lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT,
-            thickness=14,
+            thickness=16,
         )
         self._progress_var = tk.DoubleVar(value=0)
         self._progress_bar = ttk.Progressbar(
             right, variable=self._progress_var,
             style="Accent.Horizontal.TProgressbar",
-            maximum=100, length=260,
+            maximum=100, length=280,
         )
         self._progress_bar.pack(padx=14, pady=(10, 6))
 
         self._progress_label = tk.Label(
             right, text="0 / 0", bg=COLOR_PANEL,
-            fg=COLOR_TEXT, font=("Segoe UI", 12, "bold"),
+            fg=COLOR_TEXT, font=("Segoe UI", 13, "bold"),
         )
         self._progress_label.pack()
 
@@ -3341,7 +3538,7 @@ class App(tk.Tk):
         stats.pack(fill="x", padx=14, pady=10)
 
         def stat_lbl(text, color):
-            f = tk.Frame(stats, bg=COLOR_SURFACE, padx=8, pady=6)
+            f = tk.Frame(stats, bg=COLOR_SURFACE, padx=10, pady=8)
             f.pack(fill="x", pady=3)
             lbl = tk.Label(f, text="0", bg=COLOR_SURFACE, fg=color,
                            font=("Segoe UI", 16, "bold"), width=3, anchor="e")
@@ -3357,53 +3554,91 @@ class App(tk.Tk):
 
         tk.Label(right, text="Log nhanh", bg=COLOR_PANEL, fg=COLOR_TEXT,
                  font=("Segoe UI", 11, "bold")).pack(padx=14, anchor="w", pady=(8, 2))
-        self._mini_log = LogBox(right, height=12, font=("Consolas", 9))
+        self._mini_log = LogBox(right, height=10, font=("Consolas", 9))
         self._mini_log.pack(fill="both", expand=True, padx=10, pady=(0, 12))
 
         self._post_start_ts = None
         self._timer_job = None
+        self._last_spin_idx = -1
 
     def _browse_image(self):
-        """Chọn lại danh sách ảnh (thay thế)."""
+        """Chọn lại danh sách ảnh (thay thế) — giữ Ctrl/Shift để chọn nhiều."""
         paths = filedialog.askopenfilenames(
             filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp *.webp"), ("All files", "*.*")],
-            title="Chọn 3–4 ảnh để spin (Ctrl/Shift chọn nhiều)",
+            title="Chọn nhiều ảnh để spin (Ctrl hoặc Shift chọn nhiều tấm)",
         )
         if not paths:
             return
         cached = []
+        seen_names: set[str] = set()
         for p in list(paths)[:8]:
-            if Path(p).is_file():
-                cached.append(self._cache_image(p))
+            if not Path(p).is_file():
+                continue
+            c = self._cache_image(p)
+            # Tránh trùng cùng 1 file nguồn (cùng tên + size)
+            key = f"{Path(p).name}:{Path(p).stat().st_size}"
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            cached.append(c)
         self._image_paths = cached
+        self._last_spin_idx = -1
         self._sync_image_ui()
         self._persist_draft()
-        self._log(f"Đã chọn {len(cached)} ảnh để spin", "ok")
+        if len(cached) <= 1:
+            self._log(
+                f"Đã chọn {len(cached)} ảnh — thêm ≥2 tấm (nút +Thêm) để spin chống spam",
+                "warn",
+            )
+        else:
+            self._log(
+                f"Đã chọn {len(cached)} ảnh để spin: "
+                + ", ".join(Path(p).name for p in cached),
+                "ok",
+            )
 
     def _browse_image_add(self):
         """Thêm ảnh vào danh sách spin (tối đa 8)."""
         paths = filedialog.askopenfilenames(
             filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp *.webp"), ("All files", "*.*")],
-            title="Thêm ảnh vào bộ spin",
+            title="Thêm ảnh vào bộ spin (có thể chọn nhiều)",
         )
         if not paths:
             return
         current = list(getattr(self, "_image_paths", []) or [])
+        existing_keys = set()
+        for p in current:
+            try:
+                existing_keys.add(f"{Path(p).name}:{Path(p).stat().st_size}")
+            except Exception:
+                existing_keys.add(Path(p).name)
         for p in paths:
             if not Path(p).is_file():
                 continue
+            try:
+                key = f"{Path(p).name}:{Path(p).stat().st_size}"
+            except Exception:
+                key = Path(p).name
+            if key in existing_keys:
+                continue
             cached = self._cache_image(p)
-            if cached not in current:
-                current.append(cached)
+            current.append(cached)
+            existing_keys.add(key)
             if len(current) >= 8:
                 break
         self._image_paths = current[:8]
+        self._last_spin_idx = -1
         self._sync_image_ui()
         self._persist_draft()
-        self._log(f"Danh sách ảnh spin: {len(self._image_paths)} tấm", "ok")
+        self._log(
+            f"Danh sách ảnh spin: {len(self._image_paths)} tấm — "
+            + ", ".join(Path(p).name for p in self._image_paths),
+            "ok",
+        )
 
     def _clear_images(self):
         self._image_paths = []
+        self._last_spin_idx = -1
         self._sync_image_ui()
         self._persist_draft()
 
@@ -3411,23 +3646,33 @@ class App(tk.Tk):
         """
         Spin ảnh cho từng nhóm.
         - rotate: xoay vòng 1→2→3→4→1…
-        - random: chọn ngẫu nhiên mỗi nhóm
+        - random: chọn ngẫu nhiên, tránh trùng tấm vừa dùng nếu ≥2 ảnh
         """
         paths = [p for p in (getattr(self, "_image_paths", []) or []) if Path(p).is_file()]
         if not paths:
-            # tương thích ô text cũ nếu còn
             one = ""
             if hasattr(self, "_image_var"):
                 one = self._image_var.get().strip()
-            if one and Path(one).is_file() and not one.startswith(f"{len(paths)} ảnh"):
+            if one and Path(one).is_file() and " ảnh:" not in one:
                 return one
             return None
         mode = "rotate"
         if hasattr(self, "_img_spin_mode"):
             mode = self._img_spin_mode.get() or "rotate"
         if mode == "random":
-            return random.choice(paths)
-        return paths[(index - 1) % len(paths)]
+            if len(paths) == 1:
+                self._last_spin_idx = 0
+                return paths[0]
+            choices = list(range(len(paths)))
+            last = getattr(self, "_last_spin_idx", -1)
+            if last in choices and len(choices) > 1:
+                choices.remove(last)
+            pick = random.choice(choices)
+            self._last_spin_idx = pick
+            return paths[pick]
+        pick = (index - 1) % len(paths)
+        self._last_spin_idx = pick
+        return paths[pick]
 
     @staticmethod
     def spin_text(text: str) -> str:
@@ -3528,6 +3773,37 @@ class App(tk.Tk):
             self._elapsed_var.set(f"⏱ Thời gian: {mm:02d}:{ss:02d}")
         self._timer_job = self.after(1000, self._tick_timer)
 
+    def _set_countdown(self, left: int, total: int):
+        """Cập nhật ô đếm ngược delay giữa các nhóm."""
+        if not hasattr(self, "_countdown_var"):
+            return
+        mm, ss = divmod(max(0, int(left)), 60)
+        self._countdown_var.set(f"{mm:02d}:{ss:02d}")
+        self._countdown_hint.set(f"Còn {left}s / delay {total}s → nhóm tiếp theo")
+        self._status_line.set(f"⏱ Đếm ngược delay: {left}s rồi đăng nhóm tiếp…")
+        try:
+            if left <= 5:
+                self._countdown_lbl.config(fg=COLOR_ERROR)
+            elif left <= 15:
+                self._countdown_lbl.config(fg=COLOR_PENDING)
+            else:
+                self._countdown_lbl.config(fg=COLOR_ACCENT2)
+        except Exception:
+            pass
+
+    def _mark_posting_group(self, n, t, name, gid, marker, img_tag):
+        if hasattr(self, "_countdown_var"):
+            self._countdown_var.set("…")
+            self._countdown_hint.set(f"Đang đăng nhóm {n}/{t}")
+            try:
+                self._countdown_lbl.config(fg=COLOR_ACCENT2)
+            except Exception:
+                pass
+        self._live(
+            f"[{n}/{t}] Đang xử lý: {name} [{gid}] (FPV{marker}, {img_tag})…",
+            "info",
+        )
+
     def _live(self, msg: str, tag: str = "info"):
         """Ghi log tức thì vào cả mini log và nhật ký."""
         self._mini_log.log(msg, tag)
@@ -3582,17 +3858,27 @@ class App(tk.Tk):
         self._progress_label.config(text=f"0 / {len(groups)}")
         self._mini_log.clear()
         self._elapsed_var.set("⏱ Thời gian: 00:00")
+        self._countdown_var.set("—")
+        self._countdown_hint.set("Đang chuẩn bị…")
+        self._last_spin_idx = -1
         self._tick_timer()
 
         spin_mode = self._img_spin_mode.get() if hasattr(self, "_img_spin_mode") else "rotate"
-        self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
+        self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay:.0f}s)", "bold")
         self._live("Mỗi nhóm: nạp lại cookies + fb_dtsg mới | xóa cache token cũ", "info")
         self._live("Spin {A|B|C} + FPV | nhóm 2+ ưu tiên mbasic", "info")
         if images:
+            names = ", ".join(f"{i+1}.{Path(p).name}" for i, p in enumerate(images))
             self._live(
-                f"Spin ảnh: {len(images)} tấm — chế độ {'ngẫu nhiên' if spin_mode == 'random' else 'xoay vòng'}",
+                f"Spin ảnh: {len(images)} tấm — "
+                f"{'ngẫu nhiên' if spin_mode == 'random' else 'xoay vòng'}: {names}",
                 "info",
             )
+            if len(images) == 1:
+                self._live(
+                    "⚠ Chỉ 1 ảnh — mọi nhóm cùng tấm. Thêm ảnh (+Thêm) để spin chống spam.",
+                    "warn",
+                )
         self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
@@ -3616,19 +3902,27 @@ class App(tk.Tk):
                 )
                 marker = self.backend._extract_verify_marker(msg_for_group) or "?"
                 image = self._pick_image_for_group(n)
+                img_idx = getattr(self, "_last_spin_idx", -1) + 1
+                img_total = len([p for p in self._image_paths if Path(p).is_file()]) or 0
                 img_name = Path(image).name if image else "không ảnh"
+                img_tag = (
+                    f"ảnh {img_idx}/{img_total}: {img_name}"
+                    if image and img_total
+                    else "không ảnh"
+                )
 
                 def _prog(msg, _n=n, _t=t, _name=gname, _gid=gid):
                     self.after(
                         0,
-                        lambda m=msg: self._live(f"[{_n}/{_t}] {_name} [{_gid}] — {m}", "info"),
+                        lambda m=msg: self._live(
+                            f"[{_n}/{_t}] {_name} [{_gid}] — {m}", "info"
+                        ),
                     )
 
                 self.after(
                     0,
-                    lambda: self._live(
-                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (FPV{marker}, ảnh: {img_name})…",
-                        "info",
+                    lambda _n=n, _t=t, _name=gname, _gid=gid, _m=marker, _img=img_tag: (
+                        self._mark_posting_group(_n, _t, _name, _gid, _m, _img)
                     ),
                 )
 
@@ -3666,31 +3960,34 @@ class App(tk.Tk):
                     0,
                     lambda st=status, name=gname, gid_=gid, res=msg_result, url=check_url,
                            o=ok_count, pnd=pending_count, e=err_count, r=remaining,
-                           p=pct, i=n, tt=t: self._on_post_result(
-                        st, name, gid_, res, url, o, pnd, e, r, p, i, tt
+                           p=pct, i=n, tt=t, im=img_tag: self._on_post_result(
+                        st, name, gid_, res, url, o, pnd, e, r, p, i, tt, im
                     ),
                 )
 
                 if idx < len(groups) - 1 and not self._stop_flag:
-                    # Delay tăng sau mỗi nhóm; thêm buffer nếu vừa lỗi (có thể bị rate-limit)
                     wait_s = int(delay) + min(idx * 3, 30)
                     if status == "failed":
                         wait_s += 15
+                    self.after(
+                        0,
+                        lambda w=wait_s: (
+                            self._live(f"⏱ Chờ delay {w}s trước nhóm tiếp theo…", "info"),
+                            self._set_countdown(w, w),
+                        ),
+                    )
                     for sec in range(wait_s):
                         if self._stop_flag:
                             break
                         left = wait_s - sec
-                        self.after(
-                            0,
-                            lambda l=left: self._status_line.set(f"Chờ {l}s rồi đăng nhóm tiếp…"),
-                        )
+                        self.after(0, lambda l=left, w=wait_s: self._set_countdown(l, w))
                         time.sleep(1)
 
             self.after(0, self._on_posting_done)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_post_result(self, status, name, gid, res, url, o, pnd, e, r, p, i, t):
+    def _on_post_result(self, status, name, gid, res, url, o, pnd, e, r, p, i, t, img_tag=""):
         self._ok_lbl.config(text=str(o))
         self._pending_lbl.config(text=str(pnd))
         self._err_lbl.config(text=str(e))
@@ -3705,7 +4002,8 @@ class App(tk.Tk):
         else:
             icon, tag, label = "❌", "err", "LỖI"
 
-        self._live(f"[{i}/{t}] {icon} {label} — {name} [{gid}]", tag)
+        extra = f" | {img_tag}" if img_tag else ""
+        self._live(f"[{i}/{t}] {icon} {label} — {name} [{gid}]{extra}", tag)
         self._live(f"    → {res}", tag)
         self._live(f"    🔗 {url}", "info")
 
@@ -3713,11 +4011,20 @@ class App(tk.Tk):
         self._stop_flag = True
         self._stop_btn.config(state="disabled")
         self._live("⏹ Đang dừng sau bài hiện tại…", "warn")
+        if hasattr(self, "_countdown_hint"):
+            self._countdown_hint.set("Đang dừng…")
 
     def _on_posting_done(self):
         self._posting = False
         self._post_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
+        if hasattr(self, "_countdown_var"):
+            self._countdown_var.set("00:00")
+            self._countdown_hint.set("Đã xong")
+            try:
+                self._countdown_lbl.config(fg=COLOR_SUCCESS)
+            except Exception:
+                pass
         if self._timer_job:
             try:
                 self.after_cancel(self._timer_job)
