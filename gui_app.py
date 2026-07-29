@@ -12,6 +12,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+from urllib.parse import unquote
 
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -46,7 +47,7 @@ COLOR_INPUT_FG = "#eaeaea"
 # ──────────────────────────────────────────────────────────────────────────────
 
 class FacebookBackend:
-    HEADERS = {
+    MOBILE_HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -54,12 +55,26 @@ class FacebookBackend:
         ),
         "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
     }
+    DESKTOP_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update(self.HEADERS)
+        self.session.headers.update(self.MOBILE_HEADERS)
         self.logged_in = False
         self._proxy = None
+        self._desktop_mode = False
 
     def set_proxy(self, proxy: str):
         """Đặt proxy (http://host:port hoặc socks5://host:port)."""
@@ -90,14 +105,73 @@ class FacebookBackend:
                 continue
         return False, "unreachable"
 
+    def _use_desktop_session(self):
+        """Dùng User-Agent desktop — bắt buộc khi cookies lấy từ Chrome."""
+        self.session.headers.clear()
+        self.session.headers.update(self.DESKTOP_HEADERS)
+        self._desktop_mode = True
+
+    def _use_mobile_session(self):
+        self.session.headers.clear()
+        self.session.headers.update(self.MOBILE_HEADERS)
+        self._desktop_mode = False
+
+    def _get_user_id(self) -> str:
+        for c in self.session.cookies:
+            if c.name == "c_user":
+                return c.value
+        return ""
+
+    def _apply_cookies(self, cookies: dict) -> bool:
+        """Gắn cookies vào session cho mọi domain Facebook."""
+        self.session.cookies.clear()
+        for name, value in cookies.items():
+            value = unquote(str(value).strip())
+            for domain in (".facebook.com", "www.facebook.com", ".www.facebook.com"):
+                self.session.cookies.set(name, value, domain=domain, path="/")
+        if "c_user" in cookies:
+            self._use_desktop_session()
+            self.logged_in = True
+            return True
+        self.logged_in = False
+        return False
+
+    def verify_session(self) -> tuple[bool, str]:
+        """Kiểm tra cookies còn hoạt động không."""
+        uid = self._get_user_id()
+        if not uid:
+            return False, "Thiếu cookie c_user — export lại cookies từ Chrome"
+
+        self._use_desktop_session()
+        try:
+            resp = self.session.get(
+                "https://www.facebook.com/",
+                timeout=20,
+                allow_redirects=True,
+            )
+            url_lower = resp.url.lower()
+            text_head = resp.text[:3000].lower()
+
+            if "checkpoint" in url_lower or "checkpoint" in text_head:
+                return False, "Tài khoản cần xác minh bảo mật trên trình duyệt"
+            if ("login" in url_lower and "login.php" in url_lower) or (
+                "name=\"email\"" in text_head and "name=\"pass\"" in text_head
+            ):
+                return False, "Cookies đã hết hạn — lấy cookies mới từ Chrome"
+            if "lỗi" in resp.text[:500].lower() and len(resp.text) < 5000:
+                return False, "Facebook trả về trang lỗi — thử export cookies lại"
+
+            return True, uid
+        except requests.exceptions.ConnectionError:
+            return False, "Không kết nối được Facebook — kiểm tra mạng/VPN"
+        except Exception as exc:
+            return False, f"Lỗi kiểm tra: {exc}"
+
     def load_cookies(self, path: Path) -> bool:
         if not path.exists():
             return False
         data = json.loads(path.read_text(encoding="utf-8"))
-        for name, value in data.items():
-            self.session.cookies.set(name, value, domain=".facebook.com")
-        self.logged_in = "c_user" in data
-        return self.logged_in
+        return self._apply_cookies(data)
 
     def save_cookies(self, path: Path):
         cookies = {c.name: c.value for c in self.session.cookies}
@@ -110,10 +184,7 @@ class FacebookBackend:
             if "=" in part:
                 name, _, value = part.partition("=")
                 cookies[name.strip()] = value.strip()
-        for name, value in cookies.items():
-            self.session.cookies.set(name, value, domain=".facebook.com")
-        self.logged_in = "c_user" in cookies
-        return self.logged_in
+        return self._apply_cookies(cookies)
 
     def login(self, email: str, password: str) -> tuple[bool, str]:
         try:
@@ -245,74 +316,162 @@ class FacebookBackend:
         return any(x in html for x in ["logout", "c_user", "mbasic_logout", "log_out"])
 
     def get_profile_name(self) -> str:
-        try:
-            resp = self.session.get(f"{MOBILE_URL}/", timeout=15)
-            m = re.search(r'<title>([^<]+)</title>', resp.text)
-            if m:
-                return m.group(1).strip()
-        except Exception:
-            pass
-        return "Người dùng Facebook"
+        uid = self._get_user_id()
+        if not uid:
+            return "Chưa đăng nhập"
+
+        ok, _ = self.verify_session()
+        if not ok:
+            return f"UID {uid} (cookies hết hạn?)"
+
+        self._use_desktop_session()
+        for url in (
+            f"https://www.facebook.com/profile.php?id={uid}",
+            "https://www.facebook.com/me",
+        ):
+            try:
+                resp = self.session.get(url, timeout=15, allow_redirects=True)
+                m = re.search(r"<title>([^<|]+)", resp.text)
+                if m:
+                    name = m.group(1).strip()
+                    bad = {"lỗi", "error", "facebook", "log in", "đăng nhập", "login"}
+                    if name.lower() not in bad and len(name) > 1:
+                        return name
+            except Exception:
+                continue
+        return f"Tài khoản {uid}"
 
     def scan_groups(self, progress_cb=None) -> list[dict]:
-        """
-        Quét danh sách nhóm từ nhiều endpoint khác nhau.
-        Ưu tiên endpoint trả nhiều nhóm nhất.
-        """
+        """Quét nhóm — ưu tiên giao diện desktop (cookies Chrome)."""
         groups: list[dict] = []
         seen: set[str] = set()
 
-        # Danh sách endpoint sẽ thử theo thứ tự
-        scan_urls = [
-            f"{MOBILE_URL}/groups/?seemore=1",
-            f"{MOBILE_URL}/groups/",
-            "https://m.facebook.com/groups/?seemore=1",
-            "https://m.facebook.com/groups/",
-            f"{MOBILE_URL}/groups/feed/",
-            f"{MOBILE_URL}/me/groups/",
-        ]
+        ok, msg = self.verify_session()
+        if not ok:
+            if progress_cb:
+                progress_cb(f"❌ {msg}")
+            return groups
 
+        self._use_desktop_session()
+
+        # ── Bước 1: Trang desktop (cookies Chrome) ────────────────────────
+        desktop_urls = [
+            "https://www.facebook.com/groups/joins/",
+            "https://www.facebook.com/groups/feed/",
+            "https://www.facebook.com/bookmarks/groups/",
+            "https://www.facebook.com/groups/",
+        ]
         raw_pages: list[str] = []
 
-        for url in scan_urls:
+        for url in desktop_urls:
             try:
                 if progress_cb:
                     progress_cb(f"🔍 Đang quét: {url}")
-                resp = self.session.get(url, timeout=30)
+                resp = self.session.get(url, timeout=30, allow_redirects=True)
                 html = resp.text
                 raw_pages.append(html)
 
-                # Theo dõi tất cả link phân trang (xem thêm)
-                more_links = re.findall(
-                    r'href="(/groups/[^"]*(?:seemore|cursor|after)[^"]*)"', html
-                )
-                for link in more_links[:5]:
+                # Phân trang cursor trong JSON
+                cursors = re.findall(r'"end_cursor"\s*:\s*"([^"]+)"', html)
+                for cursor in cursors[:3]:
                     try:
-                        r2 = self.session.get(f"{MOBILE_URL}{link}", timeout=20)
+                        r2 = self.session.get(
+                            url,
+                            params={"cursor": cursor},
+                            timeout=20,
+                        )
                         raw_pages.append(r2.text)
                     except Exception:
                         pass
             except Exception as exc:
                 if progress_cb:
-                    progress_cb(f"⚠️ Bỏ qua {url}: {exc}")
+                    progress_cb(f"⚠️ {url}: {exc}")
 
         if progress_cb:
-            progress_cb("🔍 Đang trích xuất danh sách nhóm…")
+            progress_cb("🔍 Trích xuất nhóm từ dữ liệu trang…")
 
         for html in raw_pages:
+            self._extract_groups_from_json(html, groups, seen)
             self._extract_groups_from_html(html, groups, seen)
 
-        # Nếu vẫn không tìm thấy, thử lấy qua GraphQL API nội bộ
+        # ── Bước 2: GraphQL nội bộ ────────────────────────────────────────
         if not groups:
             if progress_cb:
-                progress_cb("🔍 Thử phương pháp khác (GraphQL)…")
-            gql_groups = self._scan_groups_graphql(progress_cb)
-            for g in gql_groups:
+                progress_cb("🔍 Thử GraphQL API…")
+            gql = self._scan_groups_graphql(progress_cb)
+            for g in gql:
                 if g["id"] not in seen:
                     seen.add(g["id"])
                     groups.append(g)
 
+        # ── Bước 3: Fallback mobile ───────────────────────────────────────
+        if not groups:
+            if progress_cb:
+                progress_cb("🔍 Thử giao diện mobile…")
+            self._use_mobile_session()
+            mobile_urls = [
+                f"{MOBILE_URL}/groups/?seemore=1",
+                f"{MOBILE_URL}/groups/",
+                "https://m.facebook.com/groups/",
+            ]
+            for url in mobile_urls:
+                try:
+                    resp = self.session.get(url, timeout=25)
+                    self._extract_groups_from_json(resp.text, groups, seen)
+                    self._extract_groups_from_html(resp.text, groups, seen)
+                except Exception:
+                    pass
+            self._use_desktop_session()
+
         return groups
+
+    def _decode_json_str(self, s: str) -> str:
+        """Giải mã chuỗi JSON (\\uXXXX, \\/, ...)."""
+        try:
+            return bytes(s, "utf-8").decode("unicode_escape")
+        except Exception:
+            return s.replace("\\/", "/")
+
+    def _extract_groups_from_json(self, html: str, groups: list, seen: set):
+        """Trích xuất nhóm từ JSON nhúng trong HTML Facebook."""
+        json_patterns = [
+            # id trước name
+            r'"id"\s*:\s*"(\d{8,})"\s*,\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"__typename"\s*:\s*"Group"',
+            # name trước id
+            r'"name"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"id"\s*:\s*"(\d{8,})"\s*,\s*"__typename"\s*:\s*"Group"',
+            # group object
+            r'"group"\s*:\s*\{\s*"id"\s*:\s*"(\d+)"\s*,\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            # url kèm tên
+            r'"url"\s*:\s*"(?:https?:\\?/\\?/)?(?:www\.)?facebook\.com/groups/(\d+)/?"\s*,\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        ]
+
+        for i, pattern in enumerate(json_patterns):
+            for m in re.finditer(pattern, html):
+                if i == 1:
+                    name, gid = m.group(1), m.group(2)
+                else:
+                    gid, name = m.group(1), m.group(2)
+                name = self._decode_json_str(name).strip()
+                if gid not in seen and self._valid_name(name):
+                    seen.add(gid)
+                    groups.append({"id": gid, "name": name})
+
+        # Tìm mọi group ID trong HTML (kể cả escaped \/groups\/)
+        for m in re.finditer(r'(?:/|\\/)(?:groups|groups\\/)(\d{8,})', html):
+            gid = m.group(1)
+            if gid in seen:
+                continue
+            start = max(0, m.start() - 200)
+            end = min(len(html), m.end() + 400)
+            snippet = html[start:end]
+            name_m = re.search(
+                r'"name"\s*:\s*"((?:[^"\\]|\\.){3,80})"', snippet
+            )
+            if name_m:
+                name = self._decode_json_str(name_m.group(1)).strip()
+                if self._valid_name(name):
+                    seen.add(gid)
+                    groups.append({"id": gid, "name": name})
 
     def _extract_groups_from_html(self, html: str, groups: list, seen: set):
         """Trích xuất ID + tên nhóm từ HTML với nhiều pattern khác nhau."""
@@ -371,28 +530,99 @@ class FacebookBackend:
             return False
         return True
 
+    def _extract_fb_tokens(self, html: str) -> dict:
+        tokens: dict[str, str] = {}
+        token_patterns = {
+            "fb_dtsg": [
+                r'"DTSGInitData",\[\],\{"token":"([^"]+)"',
+                r'name="fb_dtsg"\s+value="([^"]+)"',
+                r'"fb_dtsg"\s*:\s*"([^"]+)"',
+            ],
+            "lsd": [
+                r'"LSD",\[\],\{"token":"([^"]+)"',
+                r'name="lsd"\s+value="([^"]+)"',
+            ],
+            "jazoest": [r'name="jazoest"\s+value="(\d+)"', r'jazoest=(\d+)'],
+        }
+        for key, patterns in token_patterns.items():
+            for pat in patterns:
+                m = re.search(pat, html)
+                if m:
+                    tokens[key] = m.group(1)
+                    break
+        return tokens
+
     def _scan_groups_graphql(self, progress_cb=None) -> list[dict]:
-        """Thử lấy nhóm qua endpoint GraphQL nội bộ của Facebook."""
+        """Lấy nhóm qua GraphQL nội bộ Facebook."""
         groups: list[dict] = []
+        seen: set[str] = set()
+        uid = self._get_user_id()
+        if not uid:
+            return groups
+
+        self._use_desktop_session()
         try:
-            # Lấy __user và __a token từ cookies/header
-            cookies_dict = {c.name: c.value for c in self.session.cookies}
-            uid = cookies_dict.get("c_user", "")
-            if not uid:
+            if progress_cb:
+                progress_cb("🔍 Lấy token GraphQL…")
+            resp = self.session.get(
+                "https://www.facebook.com/groups/joins/",
+                timeout=30,
+            )
+            html = resp.text
+            self._extract_groups_from_json(html, groups, seen)
+            if groups:
                 return groups
 
-            # Gọi API groups của user
-            url = f"{MOBILE_URL}/{uid}/groups/"
-            if progress_cb:
-                progress_cb(f"🔍 Quét profile groups: {url}")
-            resp = self.session.get(url, timeout=30)
-            seen: set[str] = set()
-            self._extract_groups_from_html(resp.text, groups, seen)
+            tokens = self._extract_fb_tokens(html)
+            if not tokens.get("fb_dtsg"):
+                return groups
 
-            # Thử thêm trang app/groups
-            url2 = f"{MOBILE_URL}/app/groups/"
-            resp2 = self.session.get(url2, timeout=20)
-            self._extract_groups_from_html(resp2.text, groups, seen)
+            if progress_cb:
+                progress_cb("🔍 Gọi GraphQL lấy danh sách nhóm…")
+
+            # doc_id tìm trong trang (Facebook nhúng sẵn)
+            doc_ids = re.findall(r'"doc_id"\s*:\s*"(\d{10,})"', html)
+            if not doc_ids:
+                doc_ids = ["23474203845809271"]  # fallback phổ biến
+
+            for doc_id in doc_ids[:5]:
+                try:
+                    payload = {
+                        "fb_dtsg": tokens["fb_dtsg"],
+                        "fb_api_caller_class": "RelayModern",
+                        "fb_api_req_friendly_name": "GroupsCometJoinsRootQuery",
+                        "variables": json.dumps({"count": 50, "scale": 1}),
+                        "doc_id": doc_id,
+                    }
+                    if tokens.get("lsd"):
+                        payload["lsd"] = tokens["lsd"]
+                    if tokens.get("jazoest"):
+                        payload["jazoest"] = tokens["jazoest"]
+
+                    gql_resp = self.session.post(
+                        "https://www.facebook.com/api/graphql/",
+                        data=payload,
+                        headers={
+                            **self.DESKTOP_HEADERS,
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "X-FB-Friendly-Name": "GroupsCometJoinsRootQuery",
+                        },
+                        timeout=30,
+                    )
+                    self._extract_groups_from_json(gql_resp.text, groups, seen)
+                    if groups:
+                        break
+                except Exception:
+                    continue
+
+            # Fallback: profile groups page
+            if not groups:
+                url = f"https://www.facebook.com/{uid}/groups"
+                if progress_cb:
+                    progress_cb(f"🔍 Quét profile: {url}")
+                r2 = self.session.get(url, timeout=25)
+                self._extract_groups_from_json(r2.text, groups, seen)
+                self._extract_groups_from_html(r2.text, groups, seen)
 
         except Exception:
             pass
@@ -545,8 +775,14 @@ class App(tk.Tk):
         self._build_ui()
 
     def _auto_login(self):
-        if COOKIES_FILE.exists():
-            self.backend.load_cookies(COOKIES_FILE)
+        if COOKIES_FILE.exists() and self.backend.load_cookies(COOKIES_FILE):
+            def _check():
+                valid, msg = self.backend.verify_session()
+                if valid:
+                    self.after(0, self._on_login_success_ui)
+                else:
+                    self.after(0, lambda: self._status_var.set(f"🔴 {msg}"))
+            threading.Thread(target=_check, daemon=True).start()
 
     # ── UI BUILD ──────────────────────────────────────────────────────────────
 
@@ -732,19 +968,49 @@ class App(tk.Tk):
             messagebox.showwarning("Thiếu cookies", "Vui lòng dán cookies vào ô trên.")
             return
         ok = self.backend.set_cookies_from_string(cookie_str)
-        if ok:
-            self.backend.save_cookies(COOKIES_FILE)
-            self._login_status.config(text="✅ Cookies hợp lệ! Đã lưu.", fg=COLOR_SUCCESS)
-            self._on_login_success_ui()
-        else:
+        if not ok:
             self._login_status.config(
                 text="⚠️ Không tìm thấy c_user trong cookies. Thử lại.", fg=COLOR_WARNING
             )
+            return
+
+        self.backend.save_cookies(COOKIES_FILE)
+        self._login_status.config(text="🔄 Đang kiểm tra cookies…", fg=COLOR_WARNING)
+        self.update_idletasks()
+
+        def _verify():
+            valid, msg = self.backend.verify_session()
+            self.after(0, lambda: self._on_cookies_verified(valid, msg))
+
+        threading.Thread(target=_verify, daemon=True).start()
+
+    def _on_cookies_verified(self, valid: bool, msg: str):
+        if valid:
+            self._login_status.config(text="✅ Cookies hợp lệ! Đã lưu.", fg=COLOR_SUCCESS)
+            self._on_login_success_ui()
+        else:
+            self._login_status.config(text=f"❌ {msg}", fg=COLOR_ERROR)
+            self._status_var.set("🔴 Cookies không hợp lệ")
+            messagebox.showerror(
+                "Cookies không hoạt động",
+                f"{msg}\n\n"
+                "Cách lấy cookies đúng:\n"
+                "1. Mở Chrome → đăng nhập facebook.com\n"
+                "2. Cài extension Cookie-Editor\n"
+                "3. Export → Header String (KHÔNG phải JSON)\n"
+                "4. Copy TOÀN BỘ chuỗi (phải có c_user và xs)\n"
+                "5. Dán lại vào đây",
+            )
 
     def _on_login_success_ui(self):
-        name = self.backend.get_profile_name() if self.backend.logged_in else "?"
+        valid, msg = self.backend.verify_session()
+        if not valid:
+            self._status_var.set(f"🔴 {msg}")
+            self._log(f"Session không hợp lệ: {msg}", "err")
+            return
+        name = self.backend.get_profile_name()
         self._status_var.set(f"🟢 Đã đăng nhập: {name}")
-        self._log(f"Đã đăng nhập thành công: {name}", "ok")
+        self._log(f"Đã đăng nhập: {name} (UID: {msg})", "ok")
 
     # ── GROUPS TAB ────────────────────────────────────────────────────────────
 
@@ -862,7 +1128,13 @@ class App(tk.Tk):
 
     def _scan_groups(self):
         if not self.backend.logged_in:
-            messagebox.showwarning("Chưa đăng nhập", "Vui lòng đăng nhập trước.")
+            messagebox.showwarning("Chưa đăng nhập", "Vui lòng nhập cookies trước (tab Đăng nhập).")
+            return
+
+        valid, msg = self.backend.verify_session()
+        if not valid:
+            messagebox.showerror("Cookies hết hạn", f"{msg}\n\nVui lòng lấy cookies mới từ Chrome.")
+            self._status_var.set(f"🔴 {msg}")
             return
 
         self._scan_progress_var.set("🔄 Đang quét nhóm…")
