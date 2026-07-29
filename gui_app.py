@@ -24,7 +24,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -1512,15 +1512,19 @@ class FacebookBackend:
         last_hint = ""
         claimed_unverified = 0
 
-        # Nhóm 2+: thử TEXT trước (ảnh + nội dung giống dễ bị FB nuốt / trả id giả)
+        # Nhóm 2+: vẫn ưu tiên ảnh spin nếu có; không ảnh thì text trước
         photo_order: list[str | None]
-        if self._used_post_ids:
-            photo_order = [None]
-            if photo_id:
-                photo_order.append(photo_id)
-            entry_points = ["group", "inline_composer", "feed"]
+        if photo_id:
+            if self._used_post_ids:
+                # Có ảnh khác (đã spin) → thử kèm ảnh trước, text dự phòng
+                photo_order = [photo_id, None]
+                entry_points = ["group", "inline_composer", "feed"]
+            else:
+                photo_order = [photo_id]
         else:
-            photo_order = [photo_id] if photo_id else [None]
+            photo_order = [None]
+            if self._used_post_ids:
+                entry_points = ["group", "inline_composer", "feed"]
 
         def _try_once(doc_id: str, ph_id: str | None, entry: str) -> tuple[str, str] | None:
             nonlocal last_hint, claimed_unverified
@@ -2092,12 +2096,8 @@ class FacebookBackend:
 
             post_url = action if action.startswith("http") else f"{MOBILE_URL}{action}"
 
-            # Nhóm 2+: ưu tiên text trên mbasic (ổn định hơn có ảnh)
-            use_image = (
-                image_path
-                and Path(image_path).is_file()
-                and not self._used_post_ids
-            )
+            # Dùng ảnh spin nếu có (mỗi nhóm 1 tấm khác)
+            use_image = bool(image_path and Path(image_path).is_file())
             if use_image:
                 with open(image_path, "rb") as fh:
                     post_resp = self.session.post(
@@ -2400,15 +2400,24 @@ class App(tk.Tk):
         if msg and hasattr(self, "_msg_text"):
             self._msg_text.delete("1.0", "end")
             self._msg_text.insert("1.0", msg)
-        img = draft.get("image") or ""
-        if img and Path(img).is_file() and hasattr(self, "_image_var"):
-            self._image_var.set(img)
+        images = draft.get("images") or []
+        if not images:
+            one = draft.get("image") or ""
+            if one:
+                images = [one]
+        images = [p for p in images if Path(p).is_file()]
+        if hasattr(self, "_image_paths"):
+            self._image_paths = images[:8]
+            self._sync_image_ui()
         delay = draft.get("delay")
         if delay is not None and hasattr(self, "_delay_var"):
             try:
                 self._delay_var.set(float(delay))
             except Exception:
                 pass
+        mode = draft.get("image_spin_mode")
+        if mode and hasattr(self, "_img_spin_mode"):
+            self._img_spin_mode.set(mode)
 
     def _persist_groups(self):
         try:
@@ -2421,21 +2430,29 @@ class App(tk.Tk):
             message = ""
             if hasattr(self, "_msg_text"):
                 message = self._msg_text.get("1.0", "end").rstrip("\n")
-            image = ""
-            if hasattr(self, "_image_var"):
-                image = self._image_var.get().strip()
-            if copy_image and image and Path(image).is_file():
-                image = self._cache_image(image)
-                self._image_var.set(image)
+            images = list(getattr(self, "_image_paths", []) or [])
+            if copy_image and images:
+                cached = []
+                for p in images:
+                    if Path(p).is_file():
+                        cached.append(self._cache_image(p))
+                self._image_paths = cached
+                images = cached
+                self._sync_image_ui()
             delay = 20.0
             if hasattr(self, "_delay_var"):
                 try:
                     delay = float(self._delay_var.get())
                 except Exception:
                     pass
+            mode = "rotate"
+            if hasattr(self, "_img_spin_mode"):
+                mode = self._img_spin_mode.get() or "rotate"
             _write_json(DRAFT_FILE, {
                 "message": message,
-                "image": image,
+                "image": images[0] if images else "",
+                "images": images,
+                "image_spin_mode": mode,
                 "delay": delay,
                 "saved_at": time.time(),
             })
@@ -2448,18 +2465,37 @@ class App(tk.Tk):
         if not src.is_file():
             return image_path
         _ensure_data_dir()
-        # Giữ nếu đã nằm trong thư mục cache
         try:
             if src.resolve().parent == IMAGES_DIR.resolve():
                 return str(src)
         except Exception:
             pass
-        dest = IMAGES_DIR / f"draft_{int(time.time())}_{src.name}"
+        dest = IMAGES_DIR / f"draft_{int(time.time())}_{uuid.uuid4().hex[:6]}_{src.name}"
         try:
             shutil.copy2(src, dest)
             return str(dest)
         except Exception:
             return image_path
+
+    def _sync_image_ui(self):
+        """Cập nhật ô hiển thị danh sách ảnh spin."""
+        paths = getattr(self, "_image_paths", []) or []
+        if hasattr(self, "_image_var"):
+            if not paths:
+                self._image_var.set("")
+            elif len(paths) == 1:
+                self._image_var.set(paths[0])
+            else:
+                names = [Path(p).name for p in paths]
+                self._image_var.set(f"{len(paths)} ảnh: " + " | ".join(names))
+        if hasattr(self, "_img_count_var"):
+            n = len(paths)
+            if n == 0:
+                self._img_count_var.set("Chưa chọn ảnh")
+            elif n == 1:
+                self._img_count_var.set("1 ảnh (không spin)")
+            else:
+                self._img_count_var.set(f"{n} ảnh — spin mỗi nhóm 1 tấm khác nhau")
 
     def _schedule_draft_save(self, *_args):
         if self._draft_save_job:
@@ -3025,15 +3061,24 @@ class App(tk.Tk):
         self._msg_text.pack(fill="both", expand=True)
         self._msg_text.bind("<KeyRelease>", self._schedule_draft_save)
 
-        # Image
+        # Images — hỗ trợ spin 3–4 tấm
+        img_label_row = tk.Frame(left, bg=COLOR_PANEL)
+        img_label_row.pack(fill="x", pady=(4, 0))
+        tk.Label(img_label_row, text="Ảnh đính kèm (spin 3–4 tấm)", bg=COLOR_PANEL,
+                 fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
+        self._img_count_var = tk.StringVar(value="Chưa chọn ảnh")
+        tk.Label(
+            img_label_row, textvariable=self._img_count_var,
+            bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 9),
+        ).pack(side="right")
+
         img_row = tk.Frame(left, bg=COLOR_PANEL)
         img_row.pack(fill="x", pady=4)
-        tk.Label(img_row, text="Ảnh đính kèm", bg=COLOR_PANEL,
-                 fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
 
+        self._image_paths: list[str] = []
         self._image_var = tk.StringVar()
         img_box = SoftEntry(img_row, textvariable=self._image_var, width=34)
-        img_box.pack(side="left", padx=(10, 6))
+        img_box.pack(side="left", padx=(0, 6))
 
         HoverButton(
             img_row, text="  Chọn ảnh  ", command=self._browse_image,
@@ -3041,10 +3086,32 @@ class App(tk.Tk):
             font=("Segoe UI", 10, "bold"), padx=10, pady=6,
         ).pack(side="left")
         HoverButton(
-            img_row, text=" Xóa ", command=lambda: self._image_var.set(""),
+            img_row, text=" +Thêm ", command=self._browse_image_add,
+            bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=6,
+        ).pack(side="left", padx=2)
+        HoverButton(
+            img_row, text=" Xóa ", command=self._clear_images,
             bg="#FEE2E2", fg=COLOR_ERROR, hover_bg="#FECACA",
             font=("Segoe UI", 10, "bold"), padx=8, pady=6,
-        ).pack(side="left", padx=4)
+        ).pack(side="left", padx=2)
+
+        spin_row = tk.Frame(left, bg=COLOR_PANEL)
+        spin_row.pack(fill="x", pady=(2, 4))
+        self._img_spin_mode = tk.StringVar(value="rotate")
+        tk.Label(spin_row, text="Cách spin ảnh:", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 9)).pack(side="left")
+        for val, label in (("rotate", "Xoay vòng"), ("random", "Ngẫu nhiên")):
+            tk.Radiobutton(
+                spin_row, text=label, variable=self._img_spin_mode, value=val,
+                bg=COLOR_PANEL, fg=COLOR_TEXT, selectcolor=COLOR_SURFACE,
+                activebackground=COLOR_PANEL, font=("Segoe UI", 9),
+                command=self._schedule_draft_save,
+            ).pack(side="left", padx=(8, 0))
+        tk.Label(
+            spin_row, text="(nên 3–4 ảnh khác nhau)",
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 8),
+        ).pack(side="left", padx=(10, 0))
 
         # Delay + timer row
         delay_row = tk.Frame(left, bg=COLOR_PANEL)
@@ -3155,15 +3222,70 @@ class App(tk.Tk):
         self._timer_job = None
 
     def _browse_image(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp"), ("All files", "*.*")],
-            title="Chọn ảnh đính kèm",
+        """Chọn lại danh sách ảnh (thay thế)."""
+        paths = filedialog.askopenfilenames(
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp *.webp"), ("All files", "*.*")],
+            title="Chọn 3–4 ảnh để spin (Ctrl/Shift chọn nhiều)",
         )
-        if path:
-            cached = self._cache_image(path)
-            self._image_var.set(cached)
-            self._persist_draft()
-            self._log(f"Đã lưu ảnh: {cached}", "ok")
+        if not paths:
+            return
+        cached = []
+        for p in list(paths)[:8]:
+            if Path(p).is_file():
+                cached.append(self._cache_image(p))
+        self._image_paths = cached
+        self._sync_image_ui()
+        self._persist_draft()
+        self._log(f"Đã chọn {len(cached)} ảnh để spin", "ok")
+
+    def _browse_image_add(self):
+        """Thêm ảnh vào danh sách spin (tối đa 8)."""
+        paths = filedialog.askopenfilenames(
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp *.webp"), ("All files", "*.*")],
+            title="Thêm ảnh vào bộ spin",
+        )
+        if not paths:
+            return
+        current = list(getattr(self, "_image_paths", []) or [])
+        for p in paths:
+            if not Path(p).is_file():
+                continue
+            cached = self._cache_image(p)
+            if cached not in current:
+                current.append(cached)
+            if len(current) >= 8:
+                break
+        self._image_paths = current[:8]
+        self._sync_image_ui()
+        self._persist_draft()
+        self._log(f"Danh sách ảnh spin: {len(self._image_paths)} tấm", "ok")
+
+    def _clear_images(self):
+        self._image_paths = []
+        self._sync_image_ui()
+        self._persist_draft()
+
+    def _pick_image_for_group(self, index: int) -> str | None:
+        """
+        Spin ảnh cho từng nhóm.
+        - rotate: xoay vòng 1→2→3→4→1…
+        - random: chọn ngẫu nhiên mỗi nhóm
+        """
+        paths = [p for p in (getattr(self, "_image_paths", []) or []) if Path(p).is_file()]
+        if not paths:
+            # tương thích ô text cũ nếu còn
+            one = ""
+            if hasattr(self, "_image_var"):
+                one = self._image_var.get().strip()
+            if one and Path(one).is_file() and not one.startswith(f"{len(paths)} ảnh"):
+                return one
+            return None
+        mode = "rotate"
+        if hasattr(self, "_img_spin_mode"):
+            mode = self._img_spin_mode.get() or "rotate"
+        if mode == "random":
+            return random.choice(paths)
+        return paths[(index - 1) % len(paths)]
 
     @staticmethod
     def spin_text(text: str) -> str:
@@ -3286,10 +3408,17 @@ class App(tk.Tk):
             messagebox.showwarning("Chưa chọn nhóm", "Vui lòng chọn ít nhất một nhóm.")
             return
 
-        image = self._image_var.get().strip() or None
-        if image:
-            image = self._cache_image(image)
-            self._image_var.set(image)
+        images = [p for p in (getattr(self, "_image_paths", []) or []) if Path(p).is_file()]
+        if not images:
+            one = self._image_var.get().strip()
+            if one and Path(one).is_file() and " ảnh:" not in one:
+                images = [self._cache_image(one)]
+                self._image_paths = images
+        else:
+            images = [self._cache_image(p) for p in images]
+            self._image_paths = images
+        self._sync_image_ui()
+
         delay = float(self._delay_var.get())
         if delay < 15:
             delay = 15.0
@@ -3313,9 +3442,15 @@ class App(tk.Tk):
         self._elapsed_var.set("⏱ Thời gian: 00:00")
         self._tick_timer()
 
+        spin_mode = self._img_spin_mode.get() if hasattr(self, "_img_spin_mode") else "rotate"
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
         self._live("Mỗi nhóm: nạp lại cookies + fb_dtsg mới | xóa cache token cũ", "info")
         self._live("Spin {A|B|C} + FPV | nhóm 2+ ưu tiên mbasic", "info")
+        if images:
+            self._live(
+                f"Spin ảnh: {len(images)} tấm — chế độ {'ngẫu nhiên' if spin_mode == 'random' else 'xoay vòng'}",
+                "info",
+            )
         self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
@@ -3338,6 +3473,8 @@ class App(tk.Tk):
                     message, gid, index=n, group_name=gname
                 )
                 marker = self.backend._extract_verify_marker(msg_for_group) or "?"
+                image = self._pick_image_for_group(n)
+                img_name = Path(image).name if image else "không ảnh"
 
                 def _prog(msg, _n=n, _t=t, _name=gname, _gid=gid):
                     self.after(
@@ -3348,7 +3485,8 @@ class App(tk.Tk):
                 self.after(
                     0,
                     lambda: self._live(
-                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (FPV{marker})…", "info"
+                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (FPV{marker}, ảnh: {img_name})…",
+                        "info",
                     ),
                 )
 
