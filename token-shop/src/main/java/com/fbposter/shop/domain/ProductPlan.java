@@ -67,4 +67,14 @@ public class ProductPlan {
         String s = sb.toString().trim();
         return s.isEmpty() ? "30 ngày" : s;
     }
+
+    /** Tổng phút thời hạn token theo gói khách chọn */
+    public long totalMinutes() {
+        long total = minutes
+                + hours * 60L
+                + days * 24L * 60
+                + months * 30L * 24 * 60
+                + years * 365L * 24 * 60;
+        return total > 0 ? total : 30L * 24 * 60;
+    }
 }

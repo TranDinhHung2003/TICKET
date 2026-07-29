@@ -5,12 +5,13 @@
 <div th:replace="~{fragments :: topbar}"></div>
 <section class="section">
   <h2>Thanh toán chuyển khoản</h2>
-  <p class="sub">Quét QR hoặc chuyển khoản đúng số tiền + nội dung. Token cấp tự động qua SePay.</p>
+  <p class="sub">Quét QR MB Bank hoặc chuyển khoản đúng số tiền + nội dung. Hệ thống tự tạo token theo thời hạn gói bạn chọn.</p>
 
   <div class="checkout">
     <div class="panel">
       <p><strong>Gói:</strong> <span th:text="${order.plan.name}">Gói</span></p>
-      <p><strong>Thời hạn:</strong> <span th:text="${order.plan.durationLabel()}">30 ngày</span></p>
+      <p><strong>Thời hạn token:</strong> <span th:text="${order.plan.durationLabel()}">30 ngày</span>
+        <span class="muted">(bắt đầu khi kích hoạt trên máy)</span></p>
       <p><strong>Số tiền:</strong>
         <span class="mono" th:text="${#numbers.formatInteger(order.amountVnd, 0, 'COMMA') + ' VND'}">0</span>
       </p>
@@ -19,9 +20,9 @@
         <code class="mono" id="payCode" th:text="${order.paymentCode}">FBPAY...</code>
         <button class="btn btn-sm btn-ghost" type="button" onclick="navigator.clipboard.writeText(document.getElementById('payCode').innerText)">Copy</button>
       </div>
-      <p style="margin-top:1rem"><strong>Ngân hàng:</strong> <span th:text="${bank.bankCode}">Bank</span></p>
-      <p><strong>Số TK:</strong> <span class="mono" th:text="${bank.accountNumber}">000</span></p>
-      <p><strong>Chủ TK:</strong> <span th:text="${bank.accountName}">NAME</span></p>
+      <p style="margin-top:1rem"><strong>Ngân hàng:</strong> MB Bank (<span th:text="${bank.bankCode}">MB</span>)</p>
+      <p><strong>Số TK:</strong> <span class="mono" th:text="${bank.accountNumber}">0910108069999</span></p>
+      <p><strong>Chủ TK:</strong> <span th:text="${bank.accountName}">MB BANK</span></p>
       <p class="muted">Đơn hết hạn lúc: <span th:text="${order.expiresAt}">...</span></p>
       <p id="statusLine" class="muted">Đang chờ thanh toán…</p>
       <div id="tokenBox" style="display:none" class="alert alert-ok">

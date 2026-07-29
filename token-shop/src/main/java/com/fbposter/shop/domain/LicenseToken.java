@@ -29,6 +29,10 @@ public class LicenseToken {
     @Column(nullable = false, length = 80)
     private String durationLabel;
 
+    /** Số phút thời hạn theo gói khách mua — đồng hồ chạy từ lúc kích hoạt lần đầu */
+    @Column(nullable = false, columnDefinition = "bigint default 0 not null")
+    private long durationMinutes = 0;
+
     private boolean revoked = false;
     private String machineId;
     private String machineName;
@@ -54,6 +58,8 @@ public class LicenseToken {
     public void setExpiresAt(Instant expiresAt) { this.expiresAt = expiresAt; }
     public String getDurationLabel() { return durationLabel; }
     public void setDurationLabel(String durationLabel) { this.durationLabel = durationLabel; }
+    public long getDurationMinutes() { return durationMinutes; }
+    public void setDurationMinutes(long durationMinutes) { this.durationMinutes = durationMinutes; }
     public boolean isRevoked() { return revoked; }
     public void setRevoked(boolean revoked) { this.revoked = revoked; }
     public String getMachineId() { return machineId; }

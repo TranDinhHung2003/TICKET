@@ -17,9 +17,9 @@ public class AppProperties {
 
     public static class Sepay {
         private String apiKey = "change-me";
-        private String bankCode = "Vietcombank";
-        private String accountNumber = "0010000000355";
-        private String accountName = "DEMO";
+        private String bankCode = "MB";
+        private String accountNumber = "0910108069999";
+        private String accountName = "MB BANK";
         private String paymentPrefix = "FBPAY";
 
         public String getApiKey() { return apiKey; }

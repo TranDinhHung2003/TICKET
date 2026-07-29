@@ -76,18 +76,19 @@ public class MailOtpService {
 
                     Gói: %s
                     Thời hạn: %s
-                    Hết hạn: %s
+                    (Đồng hồ thời hạn bắt đầu khi bạn kích hoạt token trên máy)
 
                     MÃ TOKEN:
                     %s
 
-                    Hướng dẫn:
-                    1. Mở app Facebook Group Poster
-                    2. Dán token vào ô kích hoạt
+                    Hướng dẫn chạy tool:
+                    1. Mở Facebook Group Poster trên máy của bạn
+                    2. Dán token vào ô kích hoạt License
                     3. Mỗi token chỉ dùng được 1 máy
+                    4. Xem lại token tại: %s/account/orders
 
-                    Lịch sử mua hàng xem tại: %s/account/orders
-                    """.formatted(planName, duration, expiresAt, token, props.getBaseUrl()));
+                    Ghi chú hệ thống (ước tính): %s
+                    """.formatted(planName, duration, token, props.getBaseUrl(), expiresAt));
             mailSender.send(msg);
         } catch (Exception ex) {
             System.out.println("[DEV MAIL TOKEN] to=" + to + " token=" + token + " err=" + ex.getMessage());
