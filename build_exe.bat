@@ -2,7 +2,11 @@
 chcp 65001 > nul
 echo ============================================
 echo  Facebook Group Poster - Build EXE
+echo  (ban thuong — source van extract duoc)
 echo ============================================
+echo.
+echo Muon bao ve code: chay build_secure.bat
+echo Muon manh hon:    chay build_nuitka.bat
 echo.
 
 :: Kiểm tra Python
