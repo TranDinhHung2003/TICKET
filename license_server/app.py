@@ -97,16 +97,22 @@ def init_db():
 
 def create_license(
     *,
+    minutes: int = 0,
+    hours: int = 0,
     days: int = 0,
     months: int = 0,
     years: int = 0,
     note: str = "",
     token: str | None = None,
 ) -> dict:
-    if days <= 0 and months <= 0 and years <= 0:
+    if minutes <= 0 and hours <= 0 and days <= 0 and months <= 0 and years <= 0:
         days = 30
     now = _utcnow()
-    delta = timedelta(days=days + months * 30 + years * 365)
+    delta = timedelta(
+        minutes=minutes,
+        hours=hours,
+        days=days + months * 30 + years * 365,
+    )
     expires = now + delta
     parts = []
     if years:
@@ -115,6 +121,10 @@ def create_license(
         parts.append(f"{months} tháng")
     if days:
         parts.append(f"{days} ngày")
+    if hours:
+        parts.append(f"{hours} giờ")
+    if minutes:
+        parts.append(f"{minutes} phút")
     label = " + ".join(parts) if parts else "30 ngày"
     tok = token or generate_token()
     with get_db() as conn:
@@ -382,11 +392,13 @@ def create_app() -> Flask:
             )
 
         days_left = max(0, (exp - now).days)
+        seconds_left = max(0, int((exp - now).total_seconds()))
         return jsonify({
             "ok": True,
             "expires_at": row["expires_at"],
             "duration_label": row["duration_label"],
             "days_left": days_left,
+            "seconds_left": seconds_left,
             "ip": ip,
             "machine_name": row["machine_name"],
         })
@@ -400,6 +412,8 @@ def create_app() -> Flask:
         data = request.get_json(silent=True) or {}
         try:
             lic = create_license(
+                minutes=int(data.get("minutes") or 0),
+                hours=int(data.get("hours") or 0),
                 days=int(data.get("days") or 0),
                 months=int(data.get("months") or 0),
                 years=int(data.get("years") or 0),

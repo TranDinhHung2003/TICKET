@@ -239,9 +239,21 @@ def verify(
     local["duration_label"] = data.get("duration_label") or local.get("duration_label")
     local["last_verify_at"] = time.time()
     local["days_left"] = data.get("days_left")
+    local["seconds_left"] = data.get("seconds_left")
     save_local_license(local)
+    sec = data.get("seconds_left")
     days = data.get("days_left")
-    extra = f" — còn ~{days} ngày" if days is not None else ""
+    if sec is not None and sec < 86400:
+        m, s = divmod(int(sec), 60)
+        h, m = divmod(m, 60)
+        if h:
+            extra = f" — còn ~{h}h{m:02d}p"
+        else:
+            extra = f" — còn ~{m} phút {s}s"
+    elif days is not None:
+        extra = f" — còn ~{days} ngày"
+    else:
+        extra = ""
     return True, f"License OK{extra}", {**local, **data}
 
 

@@ -2,9 +2,10 @@
 CLI quản lý token bản quyền.
 
 Ví dụ:
+  python -m license_server.admin create --minutes 1 --note "Thu 1 phut"
+  python -m license_server.admin create --hours 2 --note "Thu 2 gio"
   python -m license_server.admin create --months 1 --note "Khach Nam"
   python -m license_server.admin create --days 7 --note "Dung thu"
-  python -m license_server.admin create --months 3 --years 0
   python -m license_server.admin list
   python -m license_server.admin revoke FBP-XXXX-XXXX-XXXX-XXXX
   python -m license_server.admin reset FBP-XXXX-XXXX-XXXX-XXXX
@@ -16,17 +17,17 @@ import json
 import sys
 
 from license_server.app import (
-    ADMIN_KEY,
     create_license,
     get_db,
     init_db,
-    _row_public,
 )
 
 
 def cmd_create(args):
     init_db()
     lic = create_license(
+        minutes=args.minutes,
+        hours=args.hours,
         days=args.days,
         months=args.months,
         years=args.years,
@@ -131,6 +132,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("create", help="Tạo token mới")
+    c.add_argument("--minutes", type=int, default=0, help="Số phút (vd: 1 = dùng thử 1 phút)")
+    c.add_argument("--hours", type=int, default=0, help="Số giờ")
     c.add_argument("--days", type=int, default=0)
     c.add_argument("--months", type=int, default=0)
     c.add_argument("--years", type=int, default=0)
