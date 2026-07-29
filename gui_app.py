@@ -23,7 +23,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
 MOBILE_URL = "https://mbasic.facebook.com"
 
@@ -265,7 +265,7 @@ class FacebookBackend:
                 submit_url,
                 data=form_data,
                 allow_redirects=True,
-                timeout=30,
+                timeout=12,
             )
 
             # Kiểm tra checkpoint/2FA
@@ -377,7 +377,7 @@ class FacebookBackend:
             try:
                 if progress_cb:
                     progress_cb(f"🔍 Đang quét: {url}")
-                resp = self.session.get(url, timeout=30, allow_redirects=True)
+                resp = self.session.get(url, timeout=12, allow_redirects=True)
                 html = resp.text
                 raw_pages.append(html)
 
@@ -426,7 +426,7 @@ class FacebookBackend:
             ]
             for url in mobile_urls:
                 try:
-                    resp = self.session.get(url, timeout=25)
+                    resp = self.session.get(url, timeout=12)
                     self._extract_groups_from_json(resp.text, groups, seen)
                     self._extract_groups_from_html(resp.text, groups, seen)
                 except Exception:
@@ -576,7 +576,7 @@ class FacebookBackend:
                 progress_cb("🔍 Lấy token GraphQL…")
             resp = self.session.get(
                 "https://www.facebook.com/groups/joins/",
-                timeout=30,
+                timeout=12,
             )
             html = resp.text
             self._extract_groups_from_json(html, groups, seen)
@@ -617,7 +617,7 @@ class FacebookBackend:
                             "Content-Type": "application/x-www-form-urlencoded",
                             "X-FB-Friendly-Name": "GroupsCometJoinsRootQuery",
                         },
-                        timeout=30,
+                        timeout=12,
                     )
                     self._extract_groups_from_json(gql_resp.text, groups, seen)
                     if groups:
@@ -630,7 +630,7 @@ class FacebookBackend:
                 url = f"https://www.facebook.com/{uid}/groups"
                 if progress_cb:
                     progress_cb(f"🔍 Quét profile: {url}")
-                r2 = self.session.get(url, timeout=25)
+                r2 = self.session.get(url, timeout=12)
                 self._extract_groups_from_json(r2.text, groups, seen)
                 self._extract_groups_from_html(r2.text, groups, seen)
 
@@ -667,7 +667,7 @@ class FacebookBackend:
         return {}
 
     def post_to_group(
-        self, group_id: str, message: str, image_path: str = None
+        self, group_id: str, message: str, image_path: str = None, progress_cb=None
     ) -> tuple[str, str]:
         """
         Đăng bài vào nhóm.
@@ -675,22 +675,33 @@ class FacebookBackend:
         Returns:
             (status, message) với status = published | pending | failed
         """
+        def _prog(msg: str):
+            if progress_cb:
+                try:
+                    progress_cb(msg)
+                except Exception:
+                    pass
+
         methods = [
-            self._post_via_graphql,
-            self._post_via_m_composer,
-            self._post_via_permalink,
-            self._post_via_mobile,
+            ("GraphQL", self._post_via_graphql),
+            ("m.facebook", self._post_via_m_composer),
+            ("permalink", self._post_via_permalink),
+            ("mobile", self._post_via_mobile),
         ]
         last_err = "Không thể đăng bài"
-        for method in methods:
-            status, msg = method(group_id, message, image_path)
+        for name, method in methods:
+            if image_path and name == "GraphQL":
+                continue
+            _prog(f"Thử {name}…")
+            try:
+                status, msg = method(group_id, message, image_path)
+            except Exception as exc:
+                status, msg = "failed", str(exc)
             if status in ("published", "pending"):
-                # Xác minh lại nếu có thể
-                verified = self._verify_post_status(group_id, message)
-                if verified:
-                    return verified, msg if verified != "failed" else msg
+                _prog(f"{name}: {msg}")
                 return status, msg
-            last_err = msg
+            last_err = msg or f"{name} thất bại"
+            _prog(f"{name} không được → thử cách khác")
         return "failed", last_err
 
     def _verify_post_status(self, group_id: str, message: str) -> str | None:
@@ -918,7 +929,7 @@ class FacebookBackend:
         group_url = f"https://www.facebook.com/groups/{group_id}"
         html = ""
         try:
-            resp = self.session.get(group_url, timeout=25)
+            resp = self.session.get(group_url, timeout=12)
             html = resp.text
         except Exception as exc:
             return "failed", f"Không mở được trang nhóm: {exc}"
@@ -930,7 +941,7 @@ class FacebookBackend:
         doc_ids = self._extract_composer_doc_ids(html)
         variables = self._build_gql_variables(group_id, message, uid)
 
-        for doc_id in doc_ids[:8]:
+        for doc_id in doc_ids[:3]:
             payload: dict = {
                 "av": uid,
                 "__user": uid,
@@ -959,7 +970,7 @@ class FacebookBackend:
                     "https://www.facebook.com/api/graphql/",
                     data=payload,
                     headers=headers,
-                    timeout=30,
+                    timeout=12,
                 )
                 status, msg = self._analyze_post_response(gql_resp.text)
                 if status in ("published", "pending"):
@@ -989,7 +1000,7 @@ class FacebookBackend:
 
         compose_url = f"https://m.facebook.com/groups/{group_id}/permalink/"
         try:
-            resp = self.session.get(compose_url, timeout=25, allow_redirects=True)
+            resp = self.session.get(compose_url, timeout=12, allow_redirects=True)
             html = resp.text
             fields = self._extract_form_fields(html)
 
@@ -1016,11 +1027,11 @@ class FacebookBackend:
                     post_resp = self.session.post(
                         post_url, data=fields,
                         files={"file": (Path(image_path).name, fh, "image/jpeg")},
-                        allow_redirects=True, timeout=60,
+                        allow_redirects=True, timeout=20,
                     )
             else:
                 post_resp = self.session.post(
-                    post_url, data=fields, allow_redirects=True, timeout=30,
+                    post_url, data=fields, allow_redirects=True, timeout=12,
                 )
 
             status, msg = self._analyze_post_response(post_resp.text)
@@ -1064,7 +1075,7 @@ class FacebookBackend:
 
         for compose_url in compose_urls:
             try:
-                resp = self.session.get(compose_url, timeout=25, allow_redirects=True)
+                resp = self.session.get(compose_url, timeout=12, allow_redirects=True)
                 fields = self._extract_form_fields(resp.text)
                 if not fields:
                     continue
@@ -1090,7 +1101,7 @@ class FacebookBackend:
                 post_url = action if action.startswith("http") else f"https://www.facebook.com{action}"
 
                 post_resp = self.session.post(
-                    post_url, data=fields, allow_redirects=True, timeout=30
+                    post_url, data=fields, allow_redirects=True, timeout=12
                 )
                 status, msg = self._analyze_post_response(post_resp.text)
                 if status in ("published", "pending"):
@@ -1126,7 +1137,7 @@ class FacebookBackend:
             html = ""
             for url in urls_to_try:
                 try:
-                    resp = self.session.get(url, timeout=25, allow_redirects=True)
+                    resp = self.session.get(url, timeout=12, allow_redirects=True)
                     if resp.status_code == 200:
                         html = resp.text
                         if "textarea" in html.lower() or "xc_message" in html:
@@ -1149,7 +1160,7 @@ class FacebookBackend:
                     html, re.I,
                 )
                 if link_m:
-                    r2 = self.session.get(f"{MOBILE_URL}{link_m.group(1)}", timeout=25)
+                    r2 = self.session.get(f"{MOBILE_URL}{link_m.group(1)}", timeout=12)
                     html = r2.text
                     action = self._find_form_action(html, group_id)
                     fields = self._extract_form_fields(html)
@@ -1174,11 +1185,11 @@ class FacebookBackend:
                     post_resp = self.session.post(
                         post_url, data=fields,
                         files={"file1": (Path(image_path).name, fh, "image/jpeg")},
-                        allow_redirects=True, timeout=60,
+                        allow_redirects=True, timeout=20,
                     )
             else:
                 post_resp = self.session.post(
-                    post_url, data=fields, allow_redirects=True, timeout=30,
+                    post_url, data=fields, allow_redirects=True, timeout=12,
                 )
 
             status, msg = self._analyze_post_response(post_resp.text)
@@ -1287,7 +1298,7 @@ class RoundedFrame(tk.Frame):
 
 
 class HoverButton(tk.Button):
-    """Nút cam (tk Button — tương thích pack/grid/config)."""
+    """Nút cam bo mềm (pad lớn, font rõ)."""
 
     def __init__(self, master, **kw):
         self._bg = kw.get("bg", COLOR_BUTTON)
@@ -1300,7 +1311,9 @@ class HoverButton(tk.Button):
         kw.setdefault("cursor", "hand2")
         kw.setdefault("bd", 0)
         kw.setdefault("highlightthickness", 0)
-        kw.setdefault("font", ("Segoe UI", 10, "bold"))
+        kw.setdefault("font", ("Segoe UI", 11, "bold"))
+        kw.setdefault("padx", 16)
+        kw.setdefault("pady", 8)
         super().__init__(master, **kw)
         self.bind("<Enter>", lambda e: self._safe_bg(self._hover_bg))
         self.bind("<Leave>", lambda e: self._safe_bg(self._bg))
@@ -1311,6 +1324,22 @@ class HoverButton(tk.Button):
                 self.config(bg=color)
         except Exception:
             pass
+
+
+class SoftEntry(tk.Frame):
+    """Ô nhập bo góc giả lập bằng viền cam nhạt."""
+
+    def __init__(self, master, textvariable=None, width=30, show=None, **kw):
+        super().__init__(
+            master, bg=COLOR_BORDER, padx=1, pady=1,
+            highlightthickness=0,
+        )
+        self.entry = tk.Entry(
+            self, textvariable=textvariable, width=width, show=show or "",
+            bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+            relief="flat", font=("Segoe UI", 11), bd=0,
+        )
+        self.entry.pack(fill="both", expand=True, padx=8, pady=6)
 
 
 class Card(RoundedFrame):
@@ -1904,122 +1933,146 @@ class App(tk.Tk):
     def _build_post_tab(self):
         tab = self._tab_post
 
-        # Left: compose
-        left = tk.Frame(tab, bg=COLOR_BG)
-        left.pack(side="left", fill="both", expand=True, padx=(16, 8), pady=12)
+        # Left compose card
+        left_wrap = tk.Frame(tab, bg=COLOR_BG)
+        left_wrap.pack(side="left", fill="both", expand=True, padx=(14, 8), pady=12)
 
-        tk.Label(left, text="📝  Soạn bài đăng", bg=COLOR_BG, fg=COLOR_TEXT,
-                 font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(0, 4))
-        tk.Label(left,
-                 text="✅ Đã đăng  ·  ⏳ Chờ duyệt  ·  ❌ Lỗi — chỉ báo thành công khi có post ID thật",
-                 bg=COLOR_BG, fg=COLOR_ACCENT2, font=("Segoe UI", 9),
-                 wraplength=520, justify="left").pack(anchor="w", pady=(0, 10))
-
-        tk.Label(left, text="Nội dung bài đăng:", bg=COLOR_BG, fg=COLOR_TEXT_DIM,
-                 font=("Segoe UI", 10)).pack(anchor="w")
-
-        self._msg_text = scrolledtext.ScrolledText(
-            left, height=10, bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG,
-            insertbackground=COLOR_TEXT, relief="flat",
-            font=("Segoe UI", 11), wrap=tk.WORD,
+        left_card = tk.Frame(
+            left_wrap, bg=COLOR_PANEL, highlightbackground=COLOR_BORDER,
+            highlightthickness=1, padx=18, pady=16,
         )
-        self._msg_text.pack(fill="both", expand=True, pady=(4, 10))
+        left_card.pack(fill="both", expand=True)
+        left = left_card
+
+        tk.Label(left, text="Soạn bài đăng", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        tk.Label(
+            left,
+            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  —  chỉ báo OK khi có post ID",
+            bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(4, 12))
+
+        tk.Label(left, text="Nội dung", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+
+        msg_frame = tk.Frame(left, bg=COLOR_BORDER, padx=1, pady=1)
+        msg_frame.pack(fill="both", expand=True, pady=(6, 12))
+        self._msg_text = scrolledtext.ScrolledText(
+            msg_frame, height=11, bg="#FFFFFF", fg=COLOR_INPUT_FG,
+            insertbackground=COLOR_TEXT, relief="flat",
+            font=("Segoe UI", 12), wrap=tk.WORD, padx=10, pady=8,
+        )
+        self._msg_text.pack(fill="both", expand=True)
 
         # Image
-        img_row = tk.Frame(left, bg=COLOR_BG)
+        img_row = tk.Frame(left, bg=COLOR_PANEL)
         img_row.pack(fill="x", pady=4)
-        tk.Label(img_row, text="Ảnh đính kèm (tuỳ chọn):", bg=COLOR_BG,
-                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 10)).pack(side="left")
+        tk.Label(img_row, text="Ảnh đính kèm", bg=COLOR_PANEL,
+                 fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
 
         self._image_var = tk.StringVar()
-        img_entry = tk.Entry(img_row, textvariable=self._image_var, width=32,
-                             bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
-                             relief="flat", font=("Segoe UI", 10))
-        img_entry.pack(side="left", padx=(8, 4), ipady=4)
+        img_box = SoftEntry(img_row, textvariable=self._image_var, width=34)
+        img_box.pack(side="left", padx=(10, 6))
 
         HoverButton(
-            img_row, text="📁", command=self._browse_image,
-            bg=COLOR_CARD, fg=COLOR_TEXT, relief="flat", cursor="hand2",
-            font=("Segoe UI", 11), padx=6,
+            img_row, text="  Chọn ảnh  ", command=self._browse_image,
+            bg=COLOR_SURFACE, fg=COLOR_ACCENT2, hover_bg="#FFD7B5",
+            font=("Segoe UI", 10, "bold"), padx=10, pady=6,
         ).pack(side="left")
-
         HoverButton(
-            img_row, text="✖", command=lambda: self._image_var.set(""),
-            bg=COLOR_CARD, fg=COLOR_ERROR, relief="flat", cursor="hand2",
-            font=("Segoe UI", 11), padx=6,
+            img_row, text=" Xóa ", command=lambda: self._image_var.set(""),
+            bg="#FEE2E2", fg=COLOR_ERROR, hover_bg="#FECACA",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=6,
         ).pack(side="left", padx=4)
 
-        # Delay
-        delay_row = tk.Frame(left, bg=COLOR_BG)
-        delay_row.pack(fill="x", pady=8)
-        tk.Label(delay_row, text="Delay giữa các bài (giây):", bg=COLOR_BG,
-                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 10)).pack(side="left")
-        self._delay_var = tk.DoubleVar(value=20)
+        # Delay + timer row
+        delay_row = tk.Frame(left, bg=COLOR_PANEL)
+        delay_row.pack(fill="x", pady=(12, 4))
+        tk.Label(delay_row, text="Delay (giây)", bg=COLOR_PANEL,
+                 fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
+        self._delay_var = tk.DoubleVar(value=15)
         delay_spin = tk.Spinbox(
             delay_row, from_=5, to=300, textvariable=self._delay_var,
-            width=6, bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, relief="flat",
-            font=("Segoe UI", 11), buttonbackground=COLOR_CARD,
-            insertbackground=COLOR_TEXT,
+            width=5, bg="#FFFFFF", fg=COLOR_INPUT_FG, relief="solid",
+            font=("Segoe UI", 12), buttonbackground=COLOR_SURFACE,
+            insertbackground=COLOR_TEXT, highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
         )
-        delay_spin.pack(side="left", padx=(8, 4), ipady=3)
-        tk.Label(delay_row, text="giây", bg=COLOR_BG, fg=COLOR_TEXT_DIM,
-                 font=("Segoe UI", 10)).pack(side="left")
+        delay_spin.pack(side="left", padx=(10, 4), ipady=4)
+
+        self._elapsed_var = tk.StringVar(value="⏱ Thời gian: 00:00")
+        tk.Label(
+            delay_row, textvariable=self._elapsed_var,
+            bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 12, "bold"),
+        ).pack(side="right")
 
         # Buttons
-        btn_row = tk.Frame(left, bg=COLOR_BG)
-        btn_row.pack(fill="x", pady=(8, 0))
+        btn_row = tk.Frame(left, bg=COLOR_PANEL)
+        btn_row.pack(fill="x", pady=(14, 4))
 
         self._post_btn = HoverButton(
             btn_row, text="  🚀  Bắt đầu đăng bài  ", command=self._start_posting,
-            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 12, "bold"),
-            relief="flat", cursor="hand2", padx=24, pady=10,
+            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 13, "bold"),
+            padx=28, pady=12,
         )
-        self._post_btn.pack(side="left", padx=(0, 8))
+        self._post_btn.pack(side="left", padx=(0, 10))
 
         self._stop_btn = HoverButton(
-            btn_row, text="⏹  Dừng", command=self._stop_posting,
-            bg=COLOR_CARD, fg=COLOR_ERROR, font=("Segoe UI", 11, "bold"),
-            relief="flat", cursor="hand2", padx=16, pady=10, state="disabled",
+            btn_row, text="  ⏹  Dừng  ", command=self._stop_posting,
+            bg="#FFFFFF", fg=COLOR_ERROR, hover_bg="#FEE2E2",
+            font=("Segoe UI", 12, "bold"), padx=18, pady=12, state="disabled",
         )
         self._stop_btn.pack(side="left")
 
-        # Right: progress
-        right = tk.Frame(tab, bg=COLOR_PANEL, width=280)
-        right.pack(side="right", fill="y", padx=(0, 16), pady=12)
+        # Right progress panel
+        right = tk.Frame(
+            tab, bg=COLOR_PANEL, width=300,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        right.pack(side="right", fill="y", padx=(0, 14), pady=12)
         right.pack_propagate(False)
 
-        tk.Label(right, text="Tiến trình đăng bài", bg=COLOR_PANEL, fg=COLOR_TEXT,
-                 font=("Segoe UI", 11, "bold")).pack(pady=(12, 6), padx=12, anchor="w")
+        tk.Label(right, text="Tiến trình", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 14, "bold")).pack(pady=(14, 4), padx=14, anchor="w")
 
-        # Progress bar
+        self._status_line = tk.StringVar(value="Chưa chạy")
+        tk.Label(
+            right, textvariable=self._status_line, bg=COLOR_PANEL,
+            fg=COLOR_TEXT_DIM, font=("Segoe UI", 10), wraplength=260, justify="left",
+        ).pack(padx=14, anchor="w")
+
         style = ttk.Style()
-        style.configure("Accent.Horizontal.TProgressbar",
-                        troughcolor=COLOR_INPUT_BG, background=COLOR_ACCENT,
-                        borderwidth=0, lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT)
+        style.configure(
+            "Accent.Horizontal.TProgressbar",
+            troughcolor="#FFEDD5", background=COLOR_ACCENT,
+            borderwidth=0, lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT,
+            thickness=14,
+        )
         self._progress_var = tk.DoubleVar(value=0)
         self._progress_bar = ttk.Progressbar(
             right, variable=self._progress_var,
             style="Accent.Horizontal.TProgressbar",
-            maximum=100, length=240,
+            maximum=100, length=260,
         )
-        self._progress_bar.pack(padx=12, pady=(0, 8))
+        self._progress_bar.pack(padx=14, pady=(10, 6))
 
-        self._progress_label = tk.Label(right, text="0 / 0", bg=COLOR_PANEL,
-                                        fg=COLOR_TEXT_DIM, font=("Segoe UI", 10))
+        self._progress_label = tk.Label(
+            right, text="0 / 0", bg=COLOR_PANEL,
+            fg=COLOR_TEXT, font=("Segoe UI", 12, "bold"),
+        )
         self._progress_label.pack()
 
-        # Stats
         stats = tk.Frame(right, bg=COLOR_PANEL)
-        stats.pack(fill="x", padx=12, pady=8)
+        stats.pack(fill="x", padx=14, pady=10)
 
         def stat_lbl(text, color):
-            f = tk.Frame(stats, bg=COLOR_PANEL)
+            f = tk.Frame(stats, bg=COLOR_SURFACE, padx=8, pady=6)
             f.pack(fill="x", pady=3)
-            lbl = tk.Label(f, text="0", bg=COLOR_PANEL, fg=color,
-                           font=("Segoe UI", 18, "bold"))
+            lbl = tk.Label(f, text="0", bg=COLOR_SURFACE, fg=color,
+                           font=("Segoe UI", 16, "bold"), width=3, anchor="e")
             lbl.pack(side="left")
-            tk.Label(f, text=f"  {text}", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
-                     font=("Segoe UI", 10)).pack(side="left")
+            tk.Label(f, text=f"  {text}", bg=COLOR_SURFACE, fg=COLOR_TEXT,
+                     font=("Segoe UI", 11)).pack(side="left")
             return lbl
 
         self._ok_lbl = stat_lbl("Đã đăng", COLOR_SUCCESS)
@@ -2027,11 +2080,13 @@ class App(tk.Tk):
         self._err_lbl = stat_lbl("Lỗi", COLOR_ERROR)
         self._skip_lbl = stat_lbl("Còn lại", COLOR_TEXT_DIM)
 
-        # Mini log in post tab
-        tk.Label(right, text="Log nhanh:", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
-                 font=("Segoe UI", 9)).pack(padx=12, anchor="w", pady=(12, 2))
-        self._mini_log = LogBox(right, height=10, font=("Consolas", 8))
-        self._mini_log.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        tk.Label(right, text="Log nhanh", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 11, "bold")).pack(padx=14, anchor="w", pady=(8, 2))
+        self._mini_log = LogBox(right, height=12, font=("Consolas", 9))
+        self._mini_log.pack(fill="both", expand=True, padx=10, pady=(0, 12))
+
+        self._post_start_ts = None
+        self._timer_job = None
 
     def _browse_image(self):
         path = filedialog.askopenfilename(
@@ -2043,6 +2098,25 @@ class App(tk.Tk):
 
     def _get_selected_groups(self) -> list[dict]:
         return [g for var, g in self._group_vars if var.get()]
+
+    def _tick_timer(self):
+        if not self._posting or not self._post_start_ts:
+            return
+        elapsed = int(time.time() - self._post_start_ts)
+        mm, ss = divmod(elapsed, 60)
+        hh, mm = divmod(mm, 60)
+        if hh:
+            self._elapsed_var.set(f"⏱ Thời gian: {hh:02d}:{mm:02d}:{ss:02d}")
+        else:
+            self._elapsed_var.set(f"⏱ Thời gian: {mm:02d}:{ss:02d}")
+        self._timer_job = self.after(1000, self._tick_timer)
+
+    def _live(self, msg: str, tag: str = "info"):
+        """Ghi log tức thì vào cả mini log và nhật ký."""
+        self._mini_log.log(msg, tag)
+        self._log(msg, tag)
+        self._status_line.set(msg[:80])
+        self.update_idletasks()
 
     def _start_posting(self):
         if not self.backend.logged_in:
@@ -2064,6 +2138,7 @@ class App(tk.Tk):
 
         self._posting = True
         self._stop_flag = False
+        self._post_start_ts = time.time()
         self._post_btn.config(state="disabled")
         self._stop_btn.config(state="normal")
         self._ok_lbl.config(text="0")
@@ -2073,8 +2148,11 @@ class App(tk.Tk):
         self._progress_var.set(0)
         self._progress_label.config(text=f"0 / {len(groups)}")
         self._mini_log.clear()
-        self._log(f"Bắt đầu đăng bài vào {len(groups)} nhóm…", "bold")
-        self._log("Chú thích: ✅ Đã đăng  |  ⏳ Chờ duyệt  |  ❌ Lỗi", "info")
+        self._elapsed_var.set("⏱ Thời gian: 00:00")
+        self._tick_timer()
+
+        self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
+        self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
             ok_count = 0
@@ -2082,15 +2160,31 @@ class App(tk.Tk):
             err_count = 0
             for idx, g in enumerate(groups):
                 if self._stop_flag:
-                    self.after(0, lambda: self._log("⏹ Đã dừng bởi người dùng.", "warn"))
+                    self.after(0, lambda: self._live("⏹ Đã dừng bởi người dùng", "warn"))
                     break
 
-                gid = g["id"]
-                gname = g["name"]
-                label = f"{gname} [{gid}]"
-                self.after(0, lambda n=label: self._log(f"→ Đang đăng: {n}…", "info"))
+                gid = str(g["id"])
+                gname = g.get("name", gid)
+                n = idx + 1
+                t = len(groups)
 
-                status, msg_result = self.backend.post_to_group(gid, message, image)
+                def _prog(msg, _n=n, _t=t, _name=gname, _gid=gid):
+                    self.after(
+                        0,
+                        lambda m=msg: self._live(f"[{_n}/{_t}] {_name} [{_gid}] — {m}", "info"),
+                    )
+
+                self.after(
+                    0,
+                    lambda: self._live(f"[{n}/{t}] Đang xử lý: {gname} [{gid}]…", "info"),
+                )
+
+                try:
+                    status, msg_result = self.backend.post_to_group(
+                        gid, message, image, progress_cb=_prog
+                    )
+                except Exception as exc:
+                    status, msg_result = "failed", str(exc)
 
                 if status == "published":
                     ok_count += 1
@@ -2100,21 +2194,29 @@ class App(tk.Tk):
                     err_count += 1
                     status = "failed"
 
-                remaining = len(groups) - idx - 1
-                pct = ((idx + 1) / len(groups)) * 100
+                remaining = t - n
+                pct = (n / t) * 100
                 check_url = f"https://www.facebook.com/groups/{gid}"
 
                 self.after(
                     0,
                     lambda st=status, name=gname, gid_=gid, res=msg_result, url=check_url,
                            o=ok_count, pnd=pending_count, e=err_count, r=remaining,
-                           p=pct, i=idx + 1, t=len(groups): self._on_post_result(
-                        st, name, gid_, res, url, o, pnd, e, r, p, i, t
+                           p=pct, i=n, tt=t: self._on_post_result(
+                        st, name, gid_, res, url, o, pnd, e, r, p, i, tt
                     ),
                 )
 
                 if idx < len(groups) - 1 and not self._stop_flag:
-                    time.sleep(delay)
+                    for sec in range(int(delay)):
+                        if self._stop_flag:
+                            break
+                        left = int(delay) - sec
+                        self.after(
+                            0,
+                            lambda l=left: self._status_line.set(f"Chờ {l}s rồi đăng nhóm tiếp…"),
+                        )
+                        time.sleep(1)
 
             self.after(0, self._on_posting_done)
 
@@ -2135,34 +2237,45 @@ class App(tk.Tk):
         else:
             icon, tag, label = "❌", "err", "LỖI"
 
-        self._mini_log.log(f"{icon} {name} [{gid}]: {res}", tag)
-        self._log(f"[{i}/{t}] {icon} {label} — {name} [{gid}]", tag)
-        self._log(f"    → {res}", tag)
-        self._log(f"    🔗 {url}", "info")
-        self._log(f"    📋 Copy ID: {gid}", "info")
+        self._live(f"[{i}/{t}] {icon} {label} — {name} [{gid}]", tag)
+        self._live(f"    → {res}", tag)
+        self._live(f"    🔗 {url}", "info")
 
     def _stop_posting(self):
         self._stop_flag = True
         self._stop_btn.config(state="disabled")
-        self._log("⏹ Đang dừng sau bài hiện tại…", "warn")
+        self._live("⏹ Đang dừng sau bài hiện tại…", "warn")
 
     def _on_posting_done(self):
         self._posting = False
         self._post_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
+        if self._timer_job:
+            try:
+                self.after_cancel(self._timer_job)
+            except Exception:
+                pass
+            self._timer_job = None
+        elapsed = ""
+        if self._post_start_ts:
+            sec = int(time.time() - self._post_start_ts)
+            mm, ss = divmod(sec, 60)
+            elapsed = f"\n⏱ Tổng thời gian: {mm:02d}:{ss:02d}"
+            self._elapsed_var.set(f"⏱ Xong — {mm:02d}:{ss:02d}")
         ok = int(self._ok_lbl.cget("text"))
         pnd = int(self._pending_lbl.cget("text"))
         err = int(self._err_lbl.cget("text"))
-        self._log(
-            f"✅ Hoàn thành! Đã đăng: {ok} | Chờ duyệt: {pnd} | Lỗi: {err}",
+        self._live(
+            f"Hoàn thành! Đã đăng: {ok} | Chờ duyệt: {pnd} | Lỗi: {err}",
             "bold",
         )
+        self._status_line.set("Đã xong")
         messagebox.showinfo(
             "Hoàn thành",
             f"Kết quả đăng bài:\n\n"
-            f"✅ Đã đăng lên nhóm: {ok}\n"
-            f"⏳ Đang chờ admin duyệt: {pnd}\n"
-            f"❌ Lỗi / không đăng được: {err}",
+            f"✅ Đã đăng: {ok}\n"
+            f"⏳ Chờ duyệt: {pnd}\n"
+            f"❌ Lỗi: {err}{elapsed}",
         )
 
     # ── LOG TAB ───────────────────────────────────────────────────────────────
