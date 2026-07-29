@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Lịch sử mua hàng — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<section class="section">
+  <h2>Lịch sử mua hàng</h2>
+  <p class="sub">Xin chào <span th:text="${user.fullName}">User</span> — token cũng đã gửi về Gmail khi thanh toán thành công.</p>
+  <div th:if="${success}" class="alert alert-ok" th:text="${success}"></div>
+
+  <div class="panel table-wrap">
+    <table>
+      <thead>
+      <tr>
+        <th>Thời gian</th>
+        <th>Gói</th>
+        <th>Số tiền</th>
+        <th>Trạng thái</th>
+        <th>Token / hết hạn</th>
+        <th></th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr th:if="${#lists.isEmpty(orders)}">
+        <td colspan="6" class="muted">Chưa có đơn nào. <a th:href="@{/}">Mua token ngay</a></td>
+      </tr>
+      <tr th:each="o : ${orders}">
+        <td th:text="${o.createdAt}">-</td>
+        <td>
+          <div th:text="${o.plan.name}">Gói</div>
+          <div class="muted" th:text="${o.plan.durationLabel()}"></div>
+        </td>
+        <td class="mono" th:text="${#numbers.formatInteger(o.amountVnd, 0, 'COMMA') + '₫'}">0</td>
+        <td>
+          <span class="badge" th:classappend="'badge-' + ${#strings.toLowerCase(o.status.name())}" th:text="${o.status}">PENDING</span>
+        </td>
+        <td>
+          <div class="mono" th:text="${o.issuedToken != null ? o.issuedToken : '—'}">—</div>
+          <div class="muted" th:if="${o.tokenExpiresAt != null}" th:text="${'Hết hạn: ' + o.tokenExpiresAt}"></div>
+        </td>
+        <td><a th:href="@{/account/orders/{id}(id=${o.id})}">Chi tiết</a></td>
+      </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

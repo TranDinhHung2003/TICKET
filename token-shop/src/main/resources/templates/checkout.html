@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Thanh toán SePay — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<section class="section">
+  <h2>Thanh toán chuyển khoản</h2>
+  <p class="sub">Quét QR hoặc chuyển khoản đúng số tiền + nội dung. Token cấp tự động qua SePay.</p>
+
+  <div class="checkout">
+    <div class="panel">
+      <p><strong>Gói:</strong> <span th:text="${order.plan.name}">Gói</span></p>
+      <p><strong>Thời hạn:</strong> <span th:text="${order.plan.durationLabel()}">30 ngày</span></p>
+      <p><strong>Số tiền:</strong>
+        <span class="mono" th:text="${#numbers.formatInteger(order.amountVnd, 0, 'COMMA') + ' VND'}">0</span>
+      </p>
+      <p><strong>Nội dung CK (bắt buộc):</strong></p>
+      <div class="copy-row">
+        <code class="mono" id="payCode" th:text="${order.paymentCode}">FBPAY...</code>
+        <button class="btn btn-sm btn-ghost" type="button" onclick="navigator.clipboard.writeText(document.getElementById('payCode').innerText)">Copy</button>
+      </div>
+      <p style="margin-top:1rem"><strong>Ngân hàng:</strong> <span th:text="${bank.bankCode}">Bank</span></p>
+      <p><strong>Số TK:</strong> <span class="mono" th:text="${bank.accountNumber}">000</span></p>
+      <p><strong>Chủ TK:</strong> <span th:text="${bank.accountName}">NAME</span></p>
+      <p class="muted">Đơn hết hạn lúc: <span th:text="${order.expiresAt}">...</span></p>
+      <p id="statusLine" class="muted">Đang chờ thanh toán…</p>
+      <div id="tokenBox" style="display:none" class="alert alert-ok">
+        Thanh toán thành công! Token:
+        <strong class="mono" id="tokenVal"></strong>
+        <br/><a th:href="@{/account/orders}">Xem lịch sử mua hàng</a>
+      </div>
+    </div>
+    <div class="panel" style="text-align:center">
+      <img class="qr" th:src="${qrUrl}" alt="VietQR thanh toán"/>
+      <p class="muted">Quét VietQR bằng app ngân hàng</p>
+    </div>
+  </div>
+</section>
+<div th:replace="~{fragments :: footer}"></div>
+<script th:inline="javascript">
+  const orderId = /*[[${order.id}]]*/ 0;
+  const statusUrl = /*[[@{/checkout/{id}/status(id=${order.id})}]]*/ '';
+  async function poll() {
+    try {
+      const res = await fetch(statusUrl, {headers: {'Accept':'application/json'}});
+      const data = await res.json();
+      if (data.paid) {
+        document.getElementById('statusLine').textContent = 'Đã thanh toán & giao token';
+        document.getElementById('tokenBox').style.display = 'block';
+        document.getElementById('tokenVal').textContent = data.token;
+        return;
+      }
+      document.getElementById('statusLine').textContent = 'Trạng thái: ' + data.status + ' — đang chờ SePay…';
+    } catch (e) {}
+    setTimeout(poll, 3000);
+  }
+  poll();
+</script>
+</body>
+</html>

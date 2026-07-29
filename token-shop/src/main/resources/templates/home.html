@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Mua token — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+
+<section class="hero">
+  <div class="hero-kicker">Phần mềm đăng nhóm Facebook</div>
+  <h1>FB Poster</h1>
+  <p class="lead">Mua token kích hoạt nhanh qua chuyển khoản SePay. Token gửi về Gmail và lưu trong tài khoản của bạn.</p>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="#plans">Xem bảng giá</a>
+    <a class="btn btn-ghost" th:href="@{/login}">Đăng nhập để mua</a>
+  </div>
+</section>
+
+<section class="section" id="plans">
+  <h2>Bảng giá token</h2>
+  <p class="sub">Chọn gói → chuyển khoản đúng mã → nhận token tự động.</p>
+
+  <div th:if="${error}" class="alert alert-error" th:text="${error}"></div>
+
+  <div class="plan-grid">
+    <article class="plan" th:each="p : ${plans}">
+      <h3 th:text="${p.name}">Gói</h3>
+      <div class="dur" th:text="${p.durationLabel()}">30 ngày</div>
+      <div class="price" th:text="${#numbers.formatInteger(p.priceVnd, 0, 'COMMA') + '₫'}">0₫</div>
+      <p class="desc" th:text="${p.description}">Mô tả</p>
+      <form th:action="@{/buy/{id}(id=${p.id})}" method="post">
+        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+        <button class="btn btn-dark" type="submit">Mua ngay</button>
+      </form>
+    </article>
+  </div>
+</section>
+
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

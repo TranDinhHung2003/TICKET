@@ -29,7 +29,7 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -4047,20 +4047,26 @@ class App(tk.Tk):
         self.update_idletasks()
 
     def _start_posting(self):
-        if not getattr(self, "_license_ok", False):
+        if lic:
+            ok, msg, data = lic.verify(timeout=8.0)
+            if not ok:
+                self._license_ok = False
+                messagebox.showerror(
+                    "Token hết hạn / chưa kích hoạt",
+                    msg or "Bạn cần mua token để sử dụng tiếp.",
+                )
+                self._show_license_dialog(
+                    reason="expired" if (data or {}).get("code") == "expired" else "missing"
+                )
+                return
+            self._license_ok = True
+        elif not getattr(self, "_license_ok", False):
             messagebox.showwarning(
                 "Chưa bản quyền",
-                "Vui lòng kích hoạt token trước khi đăng bài.",
+                "Bạn cần mua token để sử dụng tiếp.",
             )
             self._show_license_dialog()
             return
-        if lic:
-            ok, msg, _ = lic.verify(timeout=8.0)
-            if not ok:
-                self._license_ok = False
-                messagebox.showerror("License", msg)
-                self._show_license_dialog()
-                return
         if not self.backend.logged_in:
             messagebox.showwarning("Chưa đăng nhập", "Vui lòng đăng nhập trước.")
             return
@@ -4586,9 +4592,15 @@ class App(tk.Tk):
                 self._license_status_var.set(("✅ " if ok else "❌ ") + msg)
                 if ok:
                     messagebox.showinfo("License", msg)
+                    self._schedule_license_watch()
                 else:
-                    messagebox.showerror("License", msg)
-                    self._show_license_dialog()
+                    messagebox.showerror(
+                        "License",
+                        msg or "Bạn cần mua token để sử dụng tiếp.",
+                    )
+                    self._show_license_dialog(
+                        reason="expired" if (data or {}).get("code") == "expired" else "missing"
+                    )
             self.after(0, _done)
 
         threading.Thread(target=_worker, daemon=True).start()
