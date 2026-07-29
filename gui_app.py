@@ -24,7 +24,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
