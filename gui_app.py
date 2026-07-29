@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import uuid
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from urllib.parse import unquote
@@ -75,6 +76,8 @@ class FacebookBackend:
         self.logged_in = False
         self._proxy = None
         self._desktop_mode = False
+        self._tokens_cache: dict = {}
+        self._tokens_cache_time: float = 0.0
 
     def set_proxy(self, proxy: str):
         """Đặt proxy (http://host:port hoặc socks5://host:port)."""
@@ -628,74 +631,365 @@ class FacebookBackend:
             pass
         return groups
 
-    def post_to_group(self, group_id: str, message: str, image_path: str = None) -> tuple[bool, str]:
-        try:
-            group_url = f"{MOBILE_URL}/groups/{group_id}/"
-            resp = self.session.get(group_url, timeout=30)
-            if resp.status_code != 200:
-                return False, f"HTTP {resp.status_code}"
+    def _get_tokens(self, force_refresh: bool = False) -> dict:
+        """Lấy fb_dtsg và các token cần thiết (cache 5 phút)."""
+        if (
+            not force_refresh
+            and self._tokens_cache
+            and time.time() - self._tokens_cache_time < 300
+        ):
+            return self._tokens_cache
 
-            action = self._find_form_action(resp.text, group_id)
-            fields = self._extract_hidden_fields(resp.text)
+        self._use_desktop_session()
+        uid = self._get_user_id()
+        for url in (
+            "https://www.facebook.com/",
+            "https://www.facebook.com/groups/feed/",
+        ):
+            try:
+                resp = self.session.get(url, timeout=20)
+                tokens = self._extract_fb_tokens(resp.text)
+                if tokens.get("fb_dtsg") and uid:
+                    tokens["__user"] = uid
+                    tokens["av"] = uid
+                    self._tokens_cache = tokens
+                    self._tokens_cache_time = time.time()
+                    return tokens
+            except Exception:
+                continue
+        return {}
+
+    def post_to_group(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[bool, str]:
+        """Đăng bài — thử desktop GraphQL trước, fallback mobile."""
+        errors: list[str] = []
+
+        ok, msg = self._post_via_graphql(group_id, message, image_path)
+        if ok:
+            return True, msg
+        errors.append(msg)
+
+        ok, msg = self._post_via_permalink(group_id, message)
+        if ok:
+            return True, msg
+        errors.append(msg)
+
+        ok, msg = self._post_via_mobile(group_id, message, image_path)
+        if ok:
+            return True, msg
+        errors.append(msg)
+
+        return False, errors[0] if errors else "Không thể đăng bài"
+
+    def _post_via_graphql(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[bool, str]:
+        """Đăng bài qua GraphQL API (desktop cookies)."""
+        if image_path and Path(image_path).is_file():
+            # Ảnh: thử mobile trước (GraphQL upload phức tạp hơn)
+            return False, "Ảnh sẽ thử qua mobile"
+
+        tokens = self._get_tokens()
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg")
+        if not fb_dtsg or not uid:
+            return False, "Không lấy được token đăng bài (fb_dtsg)"
+
+        self._use_desktop_session()
+        group_url = f"https://www.facebook.com/groups/{group_id}"
+
+        # Lấy doc_id từ trang nhóm
+        doc_id = "238010847699429"
+        try:
+            resp = self.session.get(group_url, timeout=25)
+            for pat in (
+                r'ComposerStoryCreateMutation[^}]{0,200}"doc_id"\s*:\s*"(\d+)"',
+                r'"doc_id"\s*:\s*"(\d+)"[^}]{0,200}ComposerStoryCreateMutation',
+                r'useCometComposerCreateMutation[^}]*"doc_id"\s*:\s*"(\d+)"',
+            ):
+                m = re.search(pat, resp.text)
+                if m:
+                    doc_id = m.group(1)
+                    break
+        except Exception:
+            pass
+
+        session_id = str(uuid.uuid4())
+        variables = {
+            "input": {
+                "composer_entry_point": "inline_composer",
+                "composer_source_surface": "group",
+                "composer_type": "group",
+                "logging": {"composer_session_id": session_id},
+                "source": "WWW",
+                "message": {"ranges": [], "text": message},
+                "with_tags_ids": None,
+                "inline_style_ranges": [],
+                "text_format_preset_id": "0",
+                "group_id": str(group_id),
+                "audience": {"to_id": str(group_id)},
+                "actor_id": str(uid),
+                "client_mutation_id": "1",
+            },
+            "feedLocation": "GROUP",
+            "feedbackSource": 0,
+            "focusCommentID": None,
+            "gridMediaWidth": None,
+            "groupID": str(group_id),
+            "scale": 1,
+            "privacySelectorRenderLocation": "COMET_STREAM",
+            "renderLocation": "group",
+            "useDefaultActor": False,
+            "isCrossposting": False,
+            "isFeed": False,
+        }
+
+        payload: dict = {
+            "av": uid,
+            "__user": uid,
+            "__a": "1",
+            "__comet_req": "15",
+            "fb_dtsg": fb_dtsg,
+            "fb_api_caller_class": "RelayModern",
+            "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
+            "variables": json.dumps(variables, ensure_ascii=False),
+            "doc_id": doc_id,
+        }
+        if tokens.get("lsd"):
+            payload["lsd"] = tokens["lsd"]
+        if tokens.get("jazoest"):
+            payload["jazoest"] = tokens["jazoest"]
+
+        headers = {
+            **self.DESKTOP_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
+            "Origin": "https://www.facebook.com",
+            "Referer": group_url,
+        }
+
+        try:
+            gql_resp = self.session.post(
+                "https://www.facebook.com/api/graphql/",
+                data=payload,
+                headers=headers,
+                timeout=30,
+            )
+            text = gql_resp.text
+            if text.startswith("for (;;);"):
+                text = text[9:]
+
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict) and data.get("errors"):
+                    err = data["errors"][0].get("message", "GraphQL lỗi")
+                    return False, err
+            except json.JSONDecodeError:
+                pass
+
+            success_keys = (
+                "story_create", "story_id", "post_id", "creation_id",
+                "legacy_story_hideable_id", '"is_success":true',
+            )
+            if any(k in text for k in success_keys):
+                return True, "Thành công (GraphQL)"
+
+            if "permission" in text.lower() or "not authorized" in text.lower():
+                return False, "Nhóm không cho phép đăng bài hoặc cần duyệt"
+            if "error" in text[:300].lower():
+                return False, f"Facebook từ chối: {text[:150]}"
+
+            return False, "GraphQL không xác nhận được bài đăng"
+        except Exception as exc:
+            return False, f"GraphQL: {exc}"
+
+    def _post_via_permalink(self, group_id: str, message: str) -> tuple[bool, str]:
+        """Đăng qua trang composer permalink (desktop)."""
+        self._use_desktop_session()
+        tokens = self._get_tokens()
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg")
+        if not fb_dtsg:
+            return False, "Thiếu fb_dtsg"
+
+        compose_urls = [
+            f"https://www.facebook.com/groups/{group_id}/permalink/",
+            f"https://m.facebook.com/groups/{group_id}/permalink/",
+        ]
+
+        for compose_url in compose_urls:
+            try:
+                resp = self.session.get(compose_url, timeout=25, allow_redirects=True)
+                fields = self._extract_form_fields(resp.text)
+                if not fields:
+                    continue
+
+                # Tìm trường message
+                msg_field = None
+                for key in ("message", "xc_message", "composer_message"):
+                    if key in fields or any(k.endswith(key) for k in fields):
+                        msg_field = key
+                        break
+                if not msg_field:
+                    # textarea không phải hidden
+                    if re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', resp.text):
+                        m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', resp.text)
+                        msg_field = m.group(1) if m else "message"
+                    else:
+                        msg_field = "message"
+
+                fields[msg_field] = message
+                fields["fb_dtsg"] = fb_dtsg
+                if uid:
+                    fields["__user"] = uid
+
+                action = self._find_form_action(resp.text, group_id)
+                if not action:
+                    action = compose_url
+                post_url = action if action.startswith("http") else f"https://www.facebook.com{action}"
+
+                post_resp = self.session.post(
+                    post_url, data=fields, allow_redirects=True, timeout=30
+                )
+                if self._post_ok(post_resp.text) or post_resp.status_code in (200, 302):
+                    if "error" not in post_resp.text[:500].lower():
+                        return True, "Thành công (permalink)"
+            except Exception:
+                continue
+        return False, "Không tìm thấy form permalink"
+
+    def _post_via_mobile(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[bool, str]:
+        """Fallback: đăng qua mbasic.facebook.com."""
+        saved_headers = dict(self.session.headers)
+        self._use_mobile_session()
+
+        try:
+            # Trang compose trực tiếp
+            urls_to_try = [
+                f"{MOBILE_URL}/groups/{group_id}/permalink/",
+                f"{MOBILE_URL}/groups/{group_id}/",
+                f"https://m.facebook.com/groups/{group_id}/permalink/",
+            ]
+
+            html = ""
+            compose_url = ""
+            for url in urls_to_try:
+                try:
+                    resp = self.session.get(url, timeout=25, allow_redirects=True)
+                    if resp.status_code == 200:
+                        html = resp.text
+                        compose_url = url
+                        if "xc_message" in html or "composer" in html.lower() or "message" in html:
+                            break
+                except Exception:
+                    continue
+
+            if not html:
+                return False, "Không truy cập được trang nhóm (mobile)"
+
+            action = self._find_form_action(html, group_id)
+            fields = self._extract_form_fields(html)
+
+            # Tìm textarea name
+            ta_m = re.search(
+                r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I
+            )
+            msg_key = ta_m.group(1) if ta_m else "xc_message"
 
             if not action:
-                return False, "Không tìm thấy form đăng bài (không phải thành viên?)"
+                # Tìm link compose
+                link_m = re.search(
+                    rf'href="(/groups/{group_id}/[^"]*(?:compose|permalink|post)[^"]*)"',
+                    html, re.I,
+                )
+                if link_m:
+                    compose_path = link_m.group(1)
+                    r2 = self.session.get(f"{MOBILE_URL}{compose_path}", timeout=25)
+                    html = r2.text
+                    action = self._find_form_action(html, group_id)
+                    fields = self._extract_form_fields(html)
+                    ta_m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I)
+                    msg_key = ta_m.group(1) if ta_m else "xc_message"
 
-            fields["xc_message"] = message
-            fields["view_post"] = "Đăng"
+            if not action and not fields:
+                return False, "Không tìm thấy form đăng bài (nhóm cần duyệt thành viên?)"
 
-            post_url = f"{MOBILE_URL}{action}" if action.startswith("/") else action
+            fields[msg_key] = message
+            for submit_name in ("view_post", "post", "submit"):
+                if submit_name not in fields:
+                    fields[submit_name] = "Đăng"
+
+            post_url = action if action.startswith("http") else f"{MOBILE_URL}{action}"
 
             if image_path and Path(image_path).is_file():
                 with open(image_path, "rb") as fh:
                     post_resp = self.session.post(
-                        post_url, data=fields,
+                        post_url,
+                        data=fields,
                         files={"file1": (Path(image_path).name, fh, "image/jpeg")},
-                        allow_redirects=True, timeout=60,
+                        allow_redirects=True,
+                        timeout=60,
                     )
             else:
                 post_resp = self.session.post(
-                    post_url, data=fields,
-                    allow_redirects=True, timeout=30,
+                    post_url, data=fields, allow_redirects=True, timeout=30
                 )
 
             if self._post_ok(post_resp.text):
-                return True, "Thành công"
-            return False, "Không xác nhận được bài đăng"
+                return True, "Thành công (mobile)"
+            if post_resp.status_code in (200, 302) and "login" not in post_resp.url:
+                return True, "Thành công (mobile)"
 
+            return False, "Mobile: không xác nhận được bài đăng"
         except Exception as exc:
-            return False, str(exc)
+            return False, f"Mobile: {exc}"
+        finally:
+            self.session.headers.clear()
+            self.session.headers.update(saved_headers)
+            if self._desktop_mode:
+                self._use_desktop_session()
 
     def _find_form_action(self, html: str, group_id: str) -> str:
         patterns = [
-            r'<form[^>]+action="(/groups/[^"]*compose[^"]*)"',
-            r'<form[^>]+action="(/a/group/post/[^"]*)"',
-            r'action="(/groups/' + group_id + r'/[^"]*)"',
+            r'<form[^>]+action=["\']([^"\']*(?:compose|permalink|post|group)[^"\']*)["\']',
+            r'<form[^>]+action=["\'](/groups/[^"\']*)["\']',
+            r'<form[^>]+action=["\'](/a/group/post/[^"\']*)["\']',
+            rf'action=["\'](/groups/{group_id}/[^"\']*)["\']',
         ]
         for p in patterns:
-            m = re.search(p, html)
+            m = re.search(p, html, re.I)
             if m:
                 return m.group(1)
-        m = re.search(r'<form[^>]+method=["\']post["\'][^>]+action="([^"]+)"', html, re.I)
+        m = re.search(
+            r'<form[^>]+method=["\']post["\'][^>]+action=["\']([^"\']+)["\']',
+            html, re.I,
+        )
+        if m:
+            return m.group(1)
+        m = re.search(
+            r'action=["\']([^"\']+)["\'][^>]*method=["\']post["\']',
+            html, re.I,
+        )
         return m.group(1) if m else ""
 
     def _extract_hidden_fields(self, html: str) -> dict:
         """Trích xuất các hidden input field."""
-        fields = {}
-        for input_tag in re.finditer(r'<input\b([^>]*?)/?>', html, re.I | re.S):
-            attrs_str = input_tag.group(1)
-            attrs = {}
-            for m in re.finditer(r'\b(\w+)\s*=\s*["\']([^"\']*)["\']', attrs_str):
-                attrs[m.group(1).lower()] = m.group(2)
-            name = attrs.get("name", "")
-            value = attrs.get("value", "")
-            itype = attrs.get("type", "").lower()
-            if name and itype in ("hidden", ""):
-                fields[name] = value
-        return fields
+        return self._extract_form_fields(html)
 
     def _post_ok(self, html: str) -> bool:
-        return any(x in html for x in ["story_menu", "Bài viết của bạn", "Your post", "post_action"])
+        indicators = [
+            "story_menu", "Bài viết của bạn", "Your post", "post_action",
+            "story_create", "legacy_story_hideable_id", "permalink.php",
+            "view_post_script", "m_story_permalink_view",
+        ]
+        if any(x in html for x in indicators):
+            return True
+        if "error" in html[:400].lower() and "story" not in html[:400].lower():
+            return False
+        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
