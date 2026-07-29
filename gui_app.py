@@ -5,6 +5,7 @@ Facebook Group Poster — Ứng dụng GUI Desktop
 
 import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -23,7 +24,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -867,23 +868,26 @@ class FacebookBackend:
         return out
 
     def _message_anchors(self, message: str, marker: str | None = None) -> list[str]:
-        """Chuỗi đặc trưng để tìm bài (marker + 1 dòng nội dung dài)."""
+        """
+        Chỉ dùng mã FPV + dòng unique — KHÔNG dùng đoạn đầu bài chung
+        (đoạn chung dễ khớp nhầm banner/composer → báo CHỜ DUYỆT giả).
+        """
         anchors: list[str] = []
         mk = (marker or self._extract_verify_marker(message) or "").lower()
         if mk:
             anchors.append(f"fpv{mk}")
-            anchors.append(f"[fpv-{mk}]")
-        for line in (message or "").split("\n"):
-            line = re.sub(r"\s+", " ", line).strip()
-            if re.search(r"(?i)fpv[a-z0-9]{6}", line):
-                continue
-            if len(line) >= 18 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
-                anchors.append(line[:56].lower())
-                break
+        low = (message or "").lower()
+        m = re.search(r"(\d{6}-\d+/\d{4}\s+fpv[a-z0-9]{6})", low)
+        if m:
+            anchors.append(m.group(1))
+        # Dòng spin unique nếu có mã sp-
+        m2 = re.search(r"(sp-[a-z0-9]{5})", low)
+        if m2:
+            anchors.append(m2.group(1))
         return list(dict.fromkeys(a for a in anchors if a))
 
     def _page_unavailable(self, html: str, final_url: str) -> bool:
-        low = (html or "")[:3000].lower()
+        low = (html or "")[:3500].lower()
         final = (final_url or "").lower()
         if "login" in final and "login.php" in final:
             return True
@@ -895,6 +899,7 @@ class FacebookBackend:
                 "nội dung không khả dụng",
                 "không khả dụng",
                 "page isn't available",
+                "the link you followed may be broken",
             )
         )
 
@@ -902,10 +907,14 @@ class FacebookBackend:
         self, group_id: str, post_id: str, anchors: list[str]
     ) -> str | None:
         """
-        Xác minh post_id mở được ĐÚNG trên nhóm này.
-        Redirect sang nhóm khác / unavailable → fail (chặn echo bài nhóm 1).
+        Chỉ OK khi:
+        - URL cuối cùng vẫn đúng group_id
+        - post_id có trong URL (không chỉ nằm lung tung trong HTML)
+        - Thấy mã FPV/sp- của ĐÚNG bài này trong nội dung
         """
         if not post_id or not str(post_id).isdigit():
+            return None
+        if not anchors:
             return None
         gid = str(group_id)
         pid = str(post_id)
@@ -919,7 +928,6 @@ class FacebookBackend:
         self._use_desktop_session()
         for url in candidates:
             try:
-                # Một số URL cần mobile UA
                 if "mbasic." in url or "m.facebook." in url:
                     saved = dict(self.session.headers)
                     self._use_mobile_session()
@@ -939,42 +947,37 @@ class FacebookBackend:
                 if self._page_unavailable(html, final):
                     continue
                 final_l = final.lower()
-                # Bắt buộc còn thuộc đúng group_id (không redirect sang nhóm khác)
-                on_group = (
-                    f"/groups/{gid}" in final_l
-                    or f"id={gid}" in final_l
-                    or f"%2fgroups%2f{gid}" in final_l
-                )
-                if not on_group:
-                    continue
-                # Không được nhảy sang groups/OTHER_ID/
                 other = re.search(r"/groups/(\d+)", final_l)
                 if other and other.group(1) != gid:
                     continue
+                on_group = (
+                    f"/groups/{gid}" in final_l
+                    or f"id={gid}" in final_l
+                )
+                if not on_group:
+                    continue
+                # post_id phải nằm trong URL permalink (tránh khớp số random trong HTML)
+                pid_in_url = (
+                    f"/{pid}" in final_l
+                    or f"story_fbid={pid}" in final_l
+                    or f"story_fbid%3d{pid}" in final_l
+                )
+                if not pid_in_url:
+                    continue
 
                 cleaned = self._strip_non_content_html(html).lower()
-                raw_l = html.lower()
-                # post_id xuất hiện + (anchor nội dung hoặc trang story rõ)
-                has_pid = pid in html
-                has_anchor = any(a in cleaned or a in raw_l for a in anchors) if anchors else False
-                looks_story = any(
-                    k in raw_l
-                    for k in (
-                        "story_permalink",
-                        "m_story_permalink",
-                        "legacy_story_hideable_id",
-                        "story.php",
-                        "pending",
-                        "chờ",
-                    )
-                )
-                if has_pid and (has_anchor or looks_story):
-                    if "pending" in final_l or "pending" in cleaned[:4000] or "chờ duyệt" in cleaned:
-                        return "pending"
-                    # Nhóm duyệt bài: permalink mở được thường là đã gửi (có thể đang chờ)
-                    if has_anchor:
-                        return "published"
-                    return "pending" if "group" in final_l else "published"
+                # BẮT BUỘC thấy anchor FPV của bài này
+                if not any(a in cleaned for a in anchors):
+                    continue
+
+                if (
+                    "pending" in final_l
+                    or "/pending" in final_l
+                    or "pending_approval" in cleaned
+                    or "awaiting approval" in cleaned
+                ):
+                    return "pending"
+                return "published"
             except Exception:
                 continue
         return None
@@ -982,44 +985,40 @@ class FacebookBackend:
     def _verify_pending_or_feed(
         self, group_id: str, anchors: list[str], claimed: str | None
     ) -> str | None:
-        """Tìm anchor trên pending/feed mbasic + desktop pending."""
+        """Chỉ nhận khi thấy FPV của bài này trên pending/feed (đã bỏ textarea)."""
         if not anchors:
+            return None
+        # Chỉ tin anchor kiểu fpv/sp — bỏ anchor nội dung chung nếu lỡ có
+        strict = [a for a in anchors if a.startswith("fpv") or a.startswith("sp-")]
+        if not strict:
             return None
         gid = str(group_id)
         checks = [
             ("pending", f"https://mbasic.facebook.com/groups/{gid}/pending"),
             ("pending", f"https://m.facebook.com/groups/{gid}/pending"),
-            ("pending", f"https://www.facebook.com/groups/{gid}/pending_posts"),
             ("feed", f"https://mbasic.facebook.com/groups/{gid}"),
-            ("feed", f"https://www.facebook.com/groups/{gid}"),
         ]
         for kind, url in checks:
             try:
-                if "mbasic." in url or url.startswith("https://m."):
-                    saved = dict(self.session.headers)
-                    self._use_mobile_session()
-                    try:
-                        resp = self.session.get(url, timeout=12, allow_redirects=True)
-                    finally:
-                        self.session.headers.clear()
-                        self.session.headers.update(saved)
-                        if self._desktop_mode:
-                            self._use_desktop_session()
-                else:
-                    self._use_desktop_session()
+                saved = dict(self.session.headers)
+                self._use_mobile_session()
+                try:
                     resp = self.session.get(url, timeout=12, allow_redirects=True)
+                finally:
+                    self.session.headers.clear()
+                    self.session.headers.update(saved)
+                    if self._desktop_mode:
+                        self._use_desktop_session()
                 if resp.status_code >= 400:
                     continue
                 final = resp.url.lower()
-                if "login" in final:
-                    continue
-                if f"/groups/{gid}" not in final:
+                if "login" in final or f"/groups/{gid}" not in final:
                     continue
                 cleaned = self._strip_non_content_html(resp.text).lower()
-                if any(a in cleaned for a in anchors):
+                if any(a in cleaned for a in strict):
                     if kind == "pending" or "pending" in final:
                         return "pending"
-                    return "pending" if claimed == "pending" else "published"
+                    return "published"
             except Exception:
                 continue
         return None
@@ -1383,6 +1382,16 @@ class FacebookBackend:
         last_hint = ""
         claimed_unverified = 0
 
+        # Nhóm 2+: thử TEXT trước (ảnh + nội dung giống dễ bị FB nuốt / trả id giả)
+        photo_order: list[str | None]
+        if self._used_post_ids:
+            photo_order = [None]
+            if photo_id:
+                photo_order.append(photo_id)
+            entry_points = ["group", "inline_composer", "feed"]
+        else:
+            photo_order = [photo_id] if photo_id else [None]
+
         def _try_once(doc_id: str, ph_id: str | None, entry: str) -> tuple[str, str] | None:
             nonlocal last_hint, claimed_unverified
             variables = self._build_gql_variables(
@@ -1446,7 +1455,7 @@ class FacebookBackend:
                 last_hint = f"post_id đã dùng {post_id[:16]}"
                 return None
             if post_id:
-                time.sleep(1.0)
+                time.sleep(1.2)
                 verified = self._verify_permalink(group_id, post_id, anchors)
                 if verified:
                     tag = f"{msg}"
@@ -1460,34 +1469,34 @@ class FacebookBackend:
                         pass
                     return (verified, tag)
                 claimed_unverified += 1
-                last_hint = f"permalink không mở được post {post_id[:18]}"
+                last_hint = f"permalink không có FPV / không mở được {post_id[:18]}"
                 return None
 
-            # Có pending hint nhưng không có id — để post_to_group xác minh feed
-            return (status, msg)
+            # Không có post_id — chỉ nhận nếu thấy FPV trên pending/feed
+            time.sleep(1.0)
+            v = self._verify_pending_or_feed(group_id, anchors, status)
+            if v:
+                return (v, msg)
+            claimed_unverified += 1
+            last_hint = "không có post_id và không thấy FPV trên nhóm"
+            return None
 
-        # Thử ảnh + text với nhiều entry/doc
-        for entry in entry_points:
-            for doc_id in doc_ids[:6]:
-                result = _try_once(doc_id, photo_id, entry)
-                if result:
-                    return result
-                time.sleep(0.35)
-
-        # Text-only (ảnh đôi khi khiến FB trả id giả)
-        for entry in entry_points[:2]:
-            for doc_id in doc_ids[:5]:
-                result = _try_once(doc_id, None, entry)
-                if result:
-                    st, msg = result
-                    if st != "failed":
-                        return st, f"{msg} (chỉ text)"
-                    return result
-                time.sleep(0.35)
+        for ph in photo_order:
+            for entry in entry_points:
+                for doc_id in doc_ids[:6]:
+                    result = _try_once(doc_id, ph, entry)
+                    if result:
+                        st, msg = result
+                        if st == "failed":
+                            return result
+                        if ph is None and "(chỉ text)" not in msg:
+                            msg = f"{msg} (chỉ text)" if ph is None else msg
+                        return st, msg
+                    time.sleep(0.4)
 
         hint = f" — {last_hint}" if last_hint else ""
         if claimed_unverified:
-            hint += f" | {claimed_unverified} lần FB trả id nhưng permalink fail"
+            hint += f" | {claimed_unverified} lần FB trả id giả / thiếu FPV"
         return "failed", f"GraphQL không tạo được bài thật{hint}"
 
     def _post_via_ajax_feed(
@@ -2841,8 +2850,12 @@ class App(tk.Tk):
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(
             left,
-            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  — mỗi nhóm 1 dòng FPV riêng, kiểm tra permalink",
+            text=(
+                "✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi\n"
+                "Spin: {Câu A|Câu B|Câu C} — mỗi nhóm chọn ngẫu nhiên, không trùng 100%"
+            ),
             bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10),
+            justify="left",
         ).pack(anchor="w", pady=(4, 12))
 
         tk.Label(left, text="Nội dung", bg=COLOR_PANEL, fg=COLOR_TEXT,
@@ -2998,27 +3011,89 @@ class App(tk.Tk):
             self._persist_draft()
             self._log(f"Đã lưu ảnh: {cached}", "ok")
 
+    @staticmethod
+    def spin_text(text: str) -> str:
+        """
+        Trộn văn bản dạng {A|B|C} — chọn ngẫu nhiên 1 nhánh.
+        Hỗ trợ lồng nhau giới hạn.
+        """
+        if not text or "{" not in text:
+            return text or ""
+
+        def _pick(match: re.Match) -> str:
+            options = [o.strip() for o in match.group(1).split("|")]
+            options = [o for o in options if o != ""]
+            return random.choice(options) if options else ""
+
+        out = text
+        for _ in range(25):
+            nxt = re.sub(r"\{([^{}]+)\}", _pick, out)
+            if nxt == out:
+                break
+            out = nxt
+        return out
+
+    @staticmethod
+    def _inject_invisible_noise(text: str) -> str:
+        """Chèn ký tự vô hình ngẫu nhiên để bài không hash trùng 100%."""
+        if not text:
+            return text
+        noises = ["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"]
+        chars = list(text)
+        # Chèn 2–5 noise vào khoảng trắng / sau dấu câu
+        spots = [
+            i
+            for i, ch in enumerate(chars)
+            if ch in " \n.,;:!?" and i + 1 < len(chars)
+        ]
+        if not spots:
+            return text + random.choice(noises)
+        for i in sorted(random.sample(spots, k=min(len(spots), random.randint(2, 5))), reverse=True):
+            chars.insert(i + 1, random.choice(noises))
+        return "".join(chars)
+
     def _unique_message(
         self, message: str, group_id: str, index: int = 1, group_name: str = ""
     ) -> str:
         """
-        Làm mỗi bài khác nhau rõ (FB chặn nội dung trùng giữa các nhóm).
+        Spin {A|B|C} + noise + dòng FPV riêng mỗi nhóm.
         """
-        base = re.sub(r"(?mi)\n*(?:\[FPV-[a-z0-9]{6}\]|FPV[a-z0-9]{6})\s*$", "", message or "")
-        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", base).rstrip()
-        # Bỏ dòng unique cũ nếu chạy lại
+        base = message or ""
+        # Spin trước
+        base = self.spin_text(base)
+        # Gỡ marker/dòng unique cũ
+        base = re.sub(r"(?mi)\n*(?:\[FPV-[a-z0-9]{6}\]|FPV[a-z0-9]{6})\s*$", "", base)
+        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", base)
         base = re.sub(
-            r"(?m)\n*[▪️•●◆▪]\s*\d{6}-\d+\s+FPV[a-z0-9]{6}\s*$",
+            r"(?m)\n*[▪️•●◆▪]\s*\d{6}-\d+(?:/\d{4})?\s+FPV[a-z0-9]{6}\s*$",
             "",
             base,
-        ).rstrip()
+            flags=re.I,
+        )
+        base = re.sub(r"(?mi)\n*sp-[a-z0-9]{5}\s*$", "", base).rstrip()
+
+        # Đảo nhẹ thứ tự đoạn (nếu có ≥2 đoạn) để giảm trùng cấu trúc
+        parts = [p for p in re.split(r"\n\s*\n", base) if p.strip()]
+        if len(parts) >= 2 and index > 1:
+            # Xoay vòng đoạn theo index
+            rot = (index - 1) % len(parts)
+            parts = parts[rot:] + parts[:rot]
+            base = "\n\n".join(parts)
+
+        base = self._inject_invisible_noise(base)
+
         code = uuid.uuid4().hex[:6]
+        spin_id = uuid.uuid4().hex[:5]
         ts = time.strftime("%H%M%S")
         bullets = ["▪️", "•", "●", "◆", "▪"]
         bullet = bullets[(index - 1) % len(bullets)]
         tail_gid = str(group_id)[-4:]
-        # Unique ở CUỐI — đủ khác để tránh spam filter, vẫn đọc được
-        return f"{base}\n\n{bullet} {ts}-{index}/{tail_gid} FPV{code}"
+        # Dòng unique hiển thị — dùng để xác minh + chống spam
+        return (
+            f"{base}\n\n"
+            f"{bullet} {ts}-{index}/{tail_gid} FPV{code}\n"
+            f"sp-{spin_id}"
+        )
 
     def _get_selected_groups(self) -> list[dict]:
         return [g for var, g in self._group_vars if var.get()]
@@ -3085,7 +3160,7 @@ class App(tk.Tk):
         self._tick_timer()
 
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
-        self._live("GraphQL + kiểm tra permalink đúng nhóm | mỗi bài có dòng FPV riêng", "info")
+        self._live("Spin {A|B|C} + FPV riêng | permalink phải thấy FPV mới tính OK", "info")
         self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
