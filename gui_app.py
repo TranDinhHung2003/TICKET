@@ -23,29 +23,31 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
 MOBILE_URL = "https://mbasic.facebook.com"
 
-# Giao diện hiện đại — slate dark + indigo accent
-COLOR_BG = "#0f172a"
-COLOR_PANEL = "#1e293b"
-COLOR_CARD = "#1e293b"
-COLOR_SURFACE = "#334155"
-COLOR_ACCENT = "#6366f1"
-COLOR_ACCENT_LIGHT = "#818cf8"
-COLOR_ACCENT2 = "#8b5cf6"
-COLOR_TEXT = "#f1f5f9"
-COLOR_TEXT_DIM = "#94a3b8"
-COLOR_SUCCESS = "#22c55e"
-COLOR_ERROR = "#ef4444"
-COLOR_WARNING = "#f59e0b"
-COLOR_BUTTON = "#6366f1"
-COLOR_BUTTON_HOVER = "#4f46e5"
-COLOR_INPUT_BG = "#0f172a"
-COLOR_INPUT_FG = "#f1f5f9"
-COLOR_BORDER = "#334155"
-COLOR_HEADER = "#1e1b4b"
+# Theme cam – trắng
+COLOR_BG = "#FFF7F0"
+COLOR_PANEL = "#FFFFFF"
+COLOR_CARD = "#FFFFFF"
+COLOR_SURFACE = "#FFE8D6"
+COLOR_ACCENT = "#F97316"
+COLOR_ACCENT_LIGHT = "#FB923C"
+COLOR_ACCENT2 = "#EA580C"
+COLOR_TEXT = "#1C1917"
+COLOR_TEXT_DIM = "#78716C"
+COLOR_SUCCESS = "#16A34A"
+COLOR_ERROR = "#DC2626"
+COLOR_WARNING = "#EA580C"
+COLOR_PENDING = "#D97706"
+COLOR_BUTTON = "#F97316"
+COLOR_BUTTON_HOVER = "#EA580C"
+COLOR_INPUT_BG = "#FFFBF7"
+COLOR_INPUT_FG = "#1C1917"
+COLOR_BORDER = "#FED7AA"
+COLOR_HEADER = "#F97316"
+COLOR_HEADER_TEXT = "#FFFFFF"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -666,8 +668,13 @@ class FacebookBackend:
 
     def post_to_group(
         self, group_id: str, message: str, image_path: str = None
-    ) -> tuple[bool, str]:
-        """Đăng bài — thử nhiều phương pháp, hỗ trợ bài chờ admin duyệt."""
+    ) -> tuple[str, str]:
+        """
+        Đăng bài vào nhóm.
+
+        Returns:
+            (status, message) với status = published | pending | failed
+        """
         methods = [
             self._post_via_graphql,
             self._post_via_m_composer,
@@ -676,82 +683,163 @@ class FacebookBackend:
         ]
         last_err = "Không thể đăng bài"
         for method in methods:
-            ok, msg = method(group_id, message, image_path)
-            if ok:
-                return True, msg
+            status, msg = method(group_id, message, image_path)
+            if status in ("published", "pending"):
+                # Xác minh lại nếu có thể
+                verified = self._verify_post_status(group_id, message)
+                if verified:
+                    return verified, msg if verified != "failed" else msg
+                return status, msg
             last_err = msg
-        return False, last_err
+        return "failed", last_err
 
-    def _analyze_post_response(self, text: str) -> tuple[bool, str]:
-        """Phân tích phản hồi — coi bài chờ duyệt là thành công."""
+    def _verify_post_status(self, group_id: str, message: str) -> str | None:
+        """
+        Kiểm tra sau khi đăng: published / pending / None (không xác định).
+        """
+        snippet = (message or "")[:40].strip()
+        self._use_desktop_session()
+        urls = [
+            f"https://www.facebook.com/groups/{group_id}/pending_posts/",
+            f"https://www.facebook.com/groups/{group_id}/pending/",
+            f"https://m.facebook.com/groups/{group_id}/pending/",
+            f"https://www.facebook.com/groups/{group_id}",
+        ]
+        try:
+            for url in urls:
+                try:
+                    resp = self.session.get(url, timeout=15, allow_redirects=True)
+                    html = resp.text
+                    low = html.lower()
+                    # Trang pending và có nội dung gần giống bài đăng
+                    if "pending" in url and (
+                        "pending" in low or "chờ" in low or "awaiting" in low
+                    ):
+                        if snippet and snippet.lower() in low:
+                            return "pending"
+                        if re.search(r'pending.?post|bài viết chờ|awaiting.?approval', low):
+                            # Có trang pending nhưng chưa chắc là bài của mình
+                            if snippet and snippet[:20].lower() in low:
+                                return "pending"
+                    # Feed nhóm có nội dung bài
+                    if snippet and snippet.lower() in low and "groups/" + group_id in resp.url:
+                        if "pending" not in url:
+                            return "published"
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _analyze_post_response(self, text: str) -> tuple[str, str]:
+        """
+        Phân tích phản hồi đăng bài.
+        Returns: (status, message) — status = published|pending|failed|unknown
+        """
         if text.startswith("for (;;);"):
             text = text[9:]
 
-        pending = any(k in text.lower() for k in (
-            "pending", "chờ duyệt", "chờ phê duyệt", "awaiting approval",
-            "pending_approval", "publish_status", "requires_review",
-        ))
+        low = text.lower()
 
-        # Parse JSON (có thể nhiều dòng)
+        # Lỗi rõ ràng
+        error_patterns = [
+            (r'"message"\s*:\s*"([^"]{10,160})"', True),
+            (r'you can.?t post|không thể đăng|not allowed to post', False),
+            (r'permission.?denied|không có quyền', False),
+            (r'rate.?limit|quá nhiều|try again later', False),
+        ]
+        for pat, capture in error_patterns:
+            m = re.search(pat, text, re.I)
+            if m:
+                err = m.group(1) if capture and m.lastindex else m.group(0)
+                return "failed", f"Lỗi: {err[:120]}"
+
+        pending_hints = (
+            "pending_approval", "pending post", "awaiting approval",
+            "chờ duyệt", "chờ phê duyệt", "requires_review",
+            '"publish_status":"PENDING"', "PUBLISH_STATUS_PENDING",
+            "post_is_pending", "under_review",
+        )
+        is_pending = any(k.lower() in low for k in pending_hints)
+
+        # Cần có post_id / story_id thật — không báo thành công nếu chỉ thấy từ khóa mơ hồ
+        post_id = None
+        publish_status = ""
+
         for chunk in text.split("\n"):
             chunk = chunk.strip()
-            if not chunk:
+            if not chunk or chunk[0] not in "{[":
                 continue
             try:
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
             if isinstance(data, dict) and data.get("errors"):
-                continue
+                err = data["errors"][0]
+                msg = err.get("message", "GraphQL error") if isinstance(err, dict) else str(err)
+                # Một số lỗi "pending" vẫn là gửi được
+                if "pending" in str(msg).lower():
+                    return "pending", "Đang chờ admin duyệt"
+                return "failed", f"Lỗi: {msg[:120]}"
             found, status = self._walk_json_for_post(data)
             if found:
-                if pending or "pending" in status.lower() or "duyệt" in status.lower():
-                    return True, "Đã gửi — chờ admin duyệt"
-                return True, "Đăng thành công"
+                post_id = found
+                publish_status = status
+                break
 
-        success_keys = (
-            "story_create", "story_id", "post_id", "creation_id",
-            "legacy_story_hideable_id", "legacy_token", "feedback_id",
-            '"is_success":true', "published", "group_feed",
-        )
-        if any(k in text for k in success_keys):
-            if pending:
-                return True, "Đã gửi — chờ admin duyệt"
-            return True, "Đăng thành công"
+        # Regex lấy id nếu walk JSON thất bại
+        if not post_id:
+            for pat in (
+                r'"legacy_story_hideable_id"\s*:\s*"(\d+)"',
+                r'"post_id"\s*:\s*"(\d+)"',
+                r'"story_id"\s*:\s*"([^"]+)"',
+                r'"creation_story"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
+            ):
+                m = re.search(pat, text)
+                if m:
+                    post_id = m.group(1)
+                    break
 
-        if pending and "error" not in text[:500].lower():
-            return True, "Đã gửi — chờ admin duyệt"
+        if post_id:
+            if is_pending or "pending" in publish_status.lower():
+                return "pending", f"Đang chờ admin duyệt (post: {post_id[:24]})"
+            return "published", f"Đã đăng lên nhóm (post: {post_id[:24]})"
 
-        return False, ""
+        # Không có post_id → KHÔNG báo thành công (tránh báo sai)
+        return "unknown", ""
 
-    def _walk_json_for_post(self, obj, depth=0) -> tuple[bool, str]:
-        """Duyệt JSON tìm story/post id."""
-        if depth > 12:
-            return False, ""
+    def _walk_json_for_post(self, obj, depth=0) -> tuple[str | None, str]:
+        """Duyệt JSON tìm story/post id. Trả (post_id, status)."""
+        if depth > 14:
+            return None, ""
         if isinstance(obj, dict):
-            for key in ("story_id", "post_id", "legacy_story_hideable_id", "id"):
+            typename = str(obj.get("__typename", ""))
+            for key in ("legacy_story_hideable_id", "post_id", "story_id"):
                 val = obj.get(key)
-                if val and isinstance(val, str) and len(val) > 5:
-                    if key == "id" and obj.get("__typename") not in (
-                        "Story", "Group", "Feedback", "CometStory", None
-                    ):
-                        continue
+                if val and isinstance(val, (str, int)) and len(str(val)) > 5:
                     status = str(obj.get("publish_status", obj.get("status", "")))
-                    return True, status
-            if "story_create" in obj or "story" in obj:
-                st = obj.get("story_create") or obj.get("story")
-                if isinstance(st, dict) and (st.get("id") or st.get("story_id")):
-                    return True, str(st.get("publish_status", ""))
+                    return str(val), status
+            # id của Story
+            if typename in ("Story", "CometStory", "GroupFeedStory", "Feedback"):
+                val = obj.get("id")
+                if val and isinstance(val, str) and len(val) > 8:
+                    status = str(obj.get("publish_status", obj.get("status", "")))
+                    return val, status
+            for nest_key in ("story_create", "story", "data", "node", "post"):
+                if nest_key in obj and isinstance(obj[nest_key], dict):
+                    found, status = self._walk_json_for_post(obj[nest_key], depth + 1)
+                    if found:
+                        return found, status
             for v in obj.values():
                 found, status = self._walk_json_for_post(v, depth + 1)
                 if found:
-                    return True, status
+                    return found, status
         elif isinstance(obj, list):
             for item in obj:
                 found, status = self._walk_json_for_post(item, depth + 1)
                 if found:
-                    return True, status
-        return False, ""
+                    return found, status
+        return None, ""
 
     def _extract_composer_doc_ids(self, html: str) -> list[str]:
         """Lấy doc_id liên quan composer từ HTML."""
@@ -815,16 +903,16 @@ class FacebookBackend:
 
     def _post_via_graphql(
         self, group_id: str, message: str, image_path: str = None
-    ) -> tuple[bool, str]:
+    ) -> tuple[str, str]:
         """Đăng bài qua GraphQL API (desktop cookies)."""
         if image_path and Path(image_path).is_file():
-            return False, "skip ảnh → thử mobile"
+            return "failed", "skip ảnh → thử mobile"
 
         tokens = self._get_tokens()
         uid = tokens.get("__user") or self._get_user_id()
         fb_dtsg = tokens.get("fb_dtsg")
         if not fb_dtsg or not uid:
-            return False, "Không lấy được token (fb_dtsg)"
+            return "failed", "Không lấy được token (fb_dtsg)"
 
         self._use_desktop_session()
         group_url = f"https://www.facebook.com/groups/{group_id}"
@@ -833,7 +921,11 @@ class FacebookBackend:
             resp = self.session.get(group_url, timeout=25)
             html = resp.text
         except Exception as exc:
-            return False, f"Không mở được trang nhóm: {exc}"
+            return "failed", f"Không mở được trang nhóm: {exc}"
+
+        # Nhóm không cho đăng
+        if re.search(r'only.?admins.?can.?post|chỉ admin.*đăng|you can.?t post', html, re.I):
+            return "failed", "Nhóm chỉ cho admin đăng bài"
 
         doc_ids = self._extract_composer_doc_ids(html)
         variables = self._build_gql_variables(group_id, message, uid)
@@ -869,22 +961,21 @@ class FacebookBackend:
                     headers=headers,
                     timeout=30,
                 )
-                ok, msg = self._analyze_post_response(gql_resp.text)
-                if ok:
-                    return True, msg
-                # Kiểm tra lỗi rõ ràng
-                if "error" in gql_resp.text[:400].lower():
-                    err_m = re.search(r'"message"\s*:\s*"([^"]{5,120})"', gql_resp.text)
-                    if err_m:
-                        continue
+                status, msg = self._analyze_post_response(gql_resp.text)
+                if status in ("published", "pending"):
+                    return status, msg
+                if status == "failed" and msg.startswith("Lỗi:"):
+                    # Một số doc_id sai — thử tiếp; lỗi quyền thì dừng
+                    if any(k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin")):
+                        return "failed", msg
             except Exception:
                 continue
 
-        return False, "GraphQL không thành công"
+        return "failed", "GraphQL không xác nhận được bài đăng (không có post ID)"
 
     def _post_via_m_composer(
         self, group_id: str, message: str, image_path: str = None
-    ) -> tuple[bool, str]:
+    ) -> tuple[str, str]:
         """Đăng qua m.facebook.com composer — ổn định với thành viên thường."""
         tokens = self._get_tokens()
         uid = tokens.get("__user") or self._get_user_id()
@@ -932,34 +1023,39 @@ class FacebookBackend:
                     post_url, data=fields, allow_redirects=True, timeout=30,
                 )
 
-            ok, msg = self._analyze_post_response(post_resp.text)
-            if ok:
-                return True, msg
-            if self._post_ok(post_resp.text):
-                return True, "Đã gửi bài"
-            # Chỉ coi là pending nếu có dấu hiệu rõ trong HTML
-            if any(k in post_resp.text.lower() for k in (
-                "pending", "chờ duyệt", "chờ phê duyệt", "awaiting approval",
-                "your post has been submitted", "bài viết của bạn đã được gửi",
-            )):
-                return True, "Đã gửi — chờ admin duyệt"
-            return False, "m.facebook.com: không xác nhận được bài đăng"
+            status, msg = self._analyze_post_response(post_resp.text)
+            if status in ("published", "pending"):
+                return status, msg
+            if status == "failed" and msg:
+                return status, msg
+            # Chỉ chấp nhận nếu có post id trong HTML
+            pid = re.search(
+                r'(?:story_fbid|post_id|legacy_story_hideable_id)[=:]["\']?(\d{8,})',
+                post_resp.text,
+            )
+            if pid:
+                if any(k in post_resp.text.lower() for k in (
+                    "pending", "chờ duyệt", "awaiting approval",
+                )):
+                    return "pending", f"Đang chờ admin duyệt (post: {pid.group(1)})"
+                return "published", f"Đã đăng lên nhóm (post: {pid.group(1)})"
+            return "failed", "m.facebook.com: không xác nhận được bài đăng (không có post ID)"
         except Exception as exc:
-            return False, f"m.facebook: {exc}"
+            return "failed", f"m.facebook: {exc}"
         finally:
             self.session.headers.clear()
             self.session.headers.update(saved)
             if self._desktop_mode:
                 self._use_desktop_session()
 
-    def _post_via_permalink(self, group_id: str, message: str) -> tuple[bool, str]:
+    def _post_via_permalink(self, group_id: str, message: str) -> tuple[str, str]:
         """Đăng qua trang composer permalink (desktop)."""
         self._use_desktop_session()
         tokens = self._get_tokens()
         uid = tokens.get("__user") or self._get_user_id()
         fb_dtsg = tokens.get("fb_dtsg")
         if not fb_dtsg:
-            return False, "Thiếu fb_dtsg"
+            return "failed", "Thiếu fb_dtsg"
 
         compose_urls = [
             f"https://www.facebook.com/groups/{group_id}/permalink/",
@@ -980,12 +1076,8 @@ class FacebookBackend:
                         msg_field = key
                         break
                 if not msg_field:
-                    # textarea không phải hidden
-                    if re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', resp.text):
-                        m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', resp.text)
-                        msg_field = m.group(1) if m else "message"
-                    else:
-                        msg_field = "message"
+                    m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', resp.text)
+                    msg_field = m.group(1) if m else "message"
 
                 fields[msg_field] = message
                 fields["fb_dtsg"] = fb_dtsg
@@ -1000,18 +1092,22 @@ class FacebookBackend:
                 post_resp = self.session.post(
                     post_url, data=fields, allow_redirects=True, timeout=30
                 )
-                ok, msg = self._analyze_post_response(post_resp.text)
-                if ok:
-                    return True, msg
-                if self._post_ok(post_resp.text):
-                    return True, "Đã gửi bài"
+                status, msg = self._analyze_post_response(post_resp.text)
+                if status in ("published", "pending"):
+                    return status, msg
+                pid = re.search(
+                    r'(?:story_fbid|post_id|legacy_story_hideable_id)[=:]["\']?(\d{8,})',
+                    post_resp.text,
+                )
+                if pid:
+                    return "published", f"Đã đăng lên nhóm (post: {pid.group(1)})"
             except Exception:
                 continue
-        return False, "Không tìm thấy form permalink"
+        return "failed", "Không tìm thấy form permalink"
 
     def _post_via_mobile(
         self, group_id: str, message: str, image_path: str = None
-    ) -> tuple[bool, str]:
+    ) -> tuple[str, str]:
         """Fallback: đăng qua mbasic.facebook.com."""
         tokens = self._get_tokens()
         fb_dtsg = tokens.get("fb_dtsg", "")
@@ -1039,7 +1135,10 @@ class FacebookBackend:
                     continue
 
             if not html:
-                return False, "Không truy cập trang nhóm (mobile)"
+                return "failed", "Không truy cập trang nhóm (mobile)"
+
+            if re.search(r'only.?admins|chỉ admin.*đăng|you can.?t post', html, re.I):
+                return "failed", "Nhóm chỉ cho admin đăng bài"
 
             action = self._find_form_action(html, group_id)
             fields = self._extract_form_fields(html)
@@ -1059,7 +1158,7 @@ class FacebookBackend:
             msg_key = ta_m.group(1) if ta_m else "xc_message"
 
             if not action and not fields:
-                return False, "Không tìm thấy form đăng bài"
+                return "failed", "Không tìm thấy form đăng bài"
 
             fields[msg_key] = message
             if fb_dtsg:
@@ -1082,20 +1181,25 @@ class FacebookBackend:
                     post_url, data=fields, allow_redirects=True, timeout=30,
                 )
 
-            ok, msg = self._analyze_post_response(post_resp.text)
-            if ok:
-                return True, msg
-            if self._post_ok(post_resp.text):
-                return True, "Đã gửi bài"
-            if any(k in post_resp.text.lower() for k in (
-                "pending", "chờ duyệt", "chờ phê duyệt", "awaiting approval",
-                "your post has been submitted", "bài viết của bạn đã được gửi",
-            )):
-                return True, "Đã gửi — chờ admin duyệt"
+            status, msg = self._analyze_post_response(post_resp.text)
+            if status in ("published", "pending"):
+                return status, msg
+            if status == "failed" and msg:
+                return status, msg
+            pid = re.search(
+                r'(?:story_fbid|post_id|legacy_story_hideable_id)[=:]["\']?(\d{8,})',
+                post_resp.text,
+            )
+            if pid:
+                if any(k in post_resp.text.lower() for k in (
+                    "pending", "chờ duyệt", "awaiting approval",
+                )):
+                    return "pending", f"Đang chờ admin duyệt (post: {pid.group(1)})"
+                return "published", f"Đã đăng lên nhóm (post: {pid.group(1)})"
 
-            return False, "Mobile: không xác nhận được bài đăng"
+            return "failed", "Mobile: không xác nhận được bài đăng (không có post ID)"
         except Exception as exc:
-            return False, f"Mobile: {exc}"
+            return "failed", f"Mobile: {exc}"
         finally:
             self.session.headers.clear()
             self.session.headers.update(saved_headers)
@@ -1143,34 +1247,82 @@ class FacebookBackend:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Custom Widgets
+# Custom Widgets — cam / trắng, góc bo tròn
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _round_rect(canvas, x1, y1, x2, y2, r=16, **kw):
+    points = [
+        x1 + r, y1, x1 + r, y1, x2 - r, y1, x2 - r, y1, x2, y1,
+        x2, y1 + r, x2, y1 + r, x2, y2 - r, x2, y2 - r, x2, y2,
+        x2 - r, y2, x2 - r, y2, x1 + r, y2, x1 + r, y2, x1, y2,
+        x1, y2 - r, x1, y2 - r, x1, y1 + r, x1, y1 + r, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kw)
+
+
+class RoundedFrame(tk.Frame):
+    """Khung trắng bo góc, viền cam nhạt."""
+
+    def __init__(self, master, radius=18, fill=None, border=None, **kw):
+        self._radius = radius
+        self._fill = fill or COLOR_PANEL
+        self._border = border or COLOR_BORDER
+        outer_bg = master.cget("bg") if master else COLOR_BG
+        super().__init__(master, bg=outer_bg, **kw)
+        self._canvas = tk.Canvas(self, bg=outer_bg, highlightthickness=0, bd=0)
+        self._canvas.pack(fill="both", expand=True)
+        self.inner = tk.Frame(self._canvas, bg=self._fill)
+        self._win = self._canvas.create_window(12, 12, anchor="nw", window=self.inner)
+        self.bind("<Configure>", self._redraw)
+
+    def _redraw(self, _e=None):
+        w, h = max(self.winfo_width(), 20), max(self.winfo_height(), 20)
+        self._canvas.delete("shape")
+        _round_rect(
+            self._canvas, 1, 1, w - 1, h - 1,
+            r=self._radius, fill=self._fill, outline=self._border, width=1.5, tags="shape",
+        )
+        self._canvas.tag_lower("shape")
+        self._canvas.itemconfigure(self._win, width=max(w - 24, 10), height=max(h - 24, 10))
+
+
 class HoverButton(tk.Button):
+    """Nút cam (tk Button — tương thích pack/grid/config)."""
+
     def __init__(self, master, **kw):
         self._bg = kw.get("bg", COLOR_BUTTON)
         self._hover_bg = kw.pop("hover_bg", COLOR_BUTTON_HOVER)
+        kw.setdefault("bg", self._bg)
+        kw.setdefault("fg", kw.get("fg", "#FFFFFF"))
+        kw.setdefault("activebackground", self._hover_bg)
+        kw.setdefault("activeforeground", "#FFFFFF")
         kw.setdefault("relief", "flat")
         kw.setdefault("cursor", "hand2")
         kw.setdefault("bd", 0)
-        kw.setdefault("activebackground", self._hover_bg)
+        kw.setdefault("highlightthickness", 0)
+        kw.setdefault("font", ("Segoe UI", 10, "bold"))
         super().__init__(master, **kw)
-        self.bind("<Enter>", lambda e: self.config(bg=self._hover_bg))
-        self.bind("<Leave>", lambda e: self.config(bg=self._bg))
+        self.bind("<Enter>", lambda e: self._safe_bg(self._hover_bg))
+        self.bind("<Leave>", lambda e: self._safe_bg(self._bg))
+
+    def _safe_bg(self, color):
+        try:
+            if str(self["state"]) != "disabled":
+                self.config(bg=color)
+        except Exception:
+            pass
 
 
-class Card(tk.Frame):
-    """Khung card bo góc mô phỏng."""
+class Card(RoundedFrame):
     def __init__(self, master, title: str = "", **kw):
-        pad = kw.pop("padx", 24)
-        pady = kw.pop("pady", 20)
-        super().__init__(master, bg=COLOR_PANEL, highlightbackground=COLOR_BORDER,
-                         highlightthickness=1, **kw)
+        super().__init__(master, radius=18, **kw)
         if title:
-            tk.Label(self, text=title, bg=COLOR_PANEL, fg=COLOR_TEXT,
-                     font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=pad, pady=(pady, 8))
-        self.body = tk.Frame(self, bg=COLOR_PANEL)
-        self.body.pack(fill="both", expand=True, padx=pad, pady=(0, pady))
+            tk.Label(
+                self.inner, text=title, bg=COLOR_PANEL, fg=COLOR_TEXT,
+                font=("Segoe UI", 13, "bold"),
+            ).pack(anchor="w", pady=(4, 8))
+        self.body = tk.Frame(self.inner, bg=COLOR_PANEL)
+        self.body.pack(fill="both", expand=True)
 
 
 class LogBox(scrolledtext.ScrolledText):
@@ -1179,12 +1331,15 @@ class LogBox(scrolledtext.ScrolledText):
             bg=COLOR_INPUT_BG, fg=COLOR_TEXT, font=("Consolas", 9),
             wrap=tk.WORD, state="disabled", relief="flat",
             insertbackground=COLOR_TEXT,
+            highlightthickness=1, highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_ACCENT,
         )
         defaults.update(kw)
         super().__init__(master, **defaults)
         self.tag_config("ok", foreground=COLOR_SUCCESS)
         self.tag_config("err", foreground=COLOR_ERROR)
         self.tag_config("warn", foreground=COLOR_WARNING)
+        self.tag_config("pending", foreground=COLOR_PENDING)
         self.tag_config("info", foreground=COLOR_TEXT_DIM)
         self.tag_config("bold", foreground=COLOR_TEXT, font=("Consolas", 9, "bold"))
 
@@ -1243,54 +1398,51 @@ class App(tk.Tk):
                 if valid:
                     self.after(0, self._on_login_success_ui)
                 else:
-                    self.after(0, lambda: self._status_var.set(f"🔴 {msg}"))
+                    self.after(0, lambda: self._status_var.set(f"● {msg}"))
             threading.Thread(target=_check, daemon=True).start()
 
     # ── UI BUILD ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Header ────────────────────────────────────────────────────────
+        # Header cam
         header_wrap = tk.Frame(self, bg=COLOR_HEADER, height=64)
         header_wrap.pack(fill="x", side="top")
         header_wrap.pack_propagate(False)
-
-        tk.Frame(header_wrap, bg=COLOR_ACCENT, height=3).pack(fill="x", side="top")
 
         header = tk.Frame(header_wrap, bg=COLOR_HEADER)
         header.pack(fill="both", expand=True)
 
         logo_frame = tk.Frame(header, bg=COLOR_HEADER)
         logo_frame.pack(side="left", padx=20, pady=8)
-        tk.Label(logo_frame, text="📣", bg=COLOR_HEADER, fg=COLOR_ACCENT_LIGHT,
+        tk.Label(logo_frame, text="📣", bg=COLOR_HEADER, fg=COLOR_HEADER_TEXT,
                  font=("Segoe UI", 20)).pack(side="left")
-        tk.Label(logo_frame, text=f"  {APP_TITLE}", bg=COLOR_HEADER, fg=COLOR_TEXT,
+        tk.Label(logo_frame, text=f"  {APP_TITLE}", bg=COLOR_HEADER, fg=COLOR_HEADER_TEXT,
                  font=("Segoe UI", 16, "bold")).pack(side="left")
-        tk.Label(logo_frame, text=f"  v{APP_VERSION}", bg=COLOR_HEADER, fg=COLOR_TEXT_DIM,
+        tk.Label(logo_frame, text=f"  v{APP_VERSION}", bg=COLOR_HEADER, fg="#FFEDD5",
                  font=("Segoe UI", 9)).pack(side="left", pady=(6, 0))
 
-        status_frame = tk.Frame(header, bg=COLOR_SURFACE, padx=12, pady=6)
+        status_frame = tk.Frame(header, bg="#EA580C", padx=14, pady=6)
         status_frame.pack(side="right", padx=20, pady=12)
-        self._status_var = tk.StringVar(value="⚪ Chưa đăng nhập")
-        tk.Label(status_frame, textvariable=self._status_var, bg=COLOR_SURFACE,
-                 fg=COLOR_TEXT, font=("Segoe UI", 10)).pack()
+        self._status_var = tk.StringVar(value="○ Chưa đăng nhập")
+        tk.Label(status_frame, textvariable=self._status_var, bg="#EA580C",
+                 fg=COLOR_HEADER_TEXT, font=("Segoe UI", 10)).pack()
 
-        # ── Tabs ──────────────────────────────────────────────────────────
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure("Custom.TNotebook", background=COLOR_BG, borderwidth=0)
         style.configure(
             "Custom.TNotebook.Tab",
-            background=COLOR_BG, foreground=COLOR_TEXT_DIM,
+            background=COLOR_SURFACE, foreground=COLOR_TEXT_DIM,
             padding=[18, 10], font=("Segoe UI", 10), borderwidth=0,
         )
         style.map(
             "Custom.TNotebook.Tab",
             background=[("selected", COLOR_PANEL)],
-            foreground=[("selected", COLOR_ACCENT_LIGHT)],
+            foreground=[("selected", COLOR_ACCENT2)],
         )
         style.configure(
             "Accent.Horizontal.TProgressbar",
-            troughcolor=COLOR_INPUT_BG, background=COLOR_ACCENT,
+            troughcolor="#FFEDD5", background=COLOR_ACCENT,
             borderwidth=0, lightcolor=COLOR_ACCENT, darkcolor=COLOR_ACCENT,
         )
 
@@ -1759,9 +1911,9 @@ class App(tk.Tk):
         tk.Label(left, text="📝  Soạn bài đăng", bg=COLOR_BG, fg=COLOR_TEXT,
                  font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(0, 4))
         tk.Label(left,
-                 text="💡 Thành viên thường: bài sẽ gửi thành công và chờ admin duyệt trước khi hiện",
-                 bg=COLOR_BG, fg=COLOR_WARNING, font=("Segoe UI", 9),
-                 wraplength=480, justify="left").pack(anchor="w", pady=(0, 10))
+                 text="✅ Đã đăng  ·  ⏳ Chờ duyệt  ·  ❌ Lỗi — chỉ báo thành công khi có post ID thật",
+                 bg=COLOR_BG, fg=COLOR_ACCENT2, font=("Segoe UI", 9),
+                 wraplength=520, justify="left").pack(anchor="w", pady=(0, 10))
 
         tk.Label(left, text="Nội dung bài đăng:", bg=COLOR_BG, fg=COLOR_TEXT_DIM,
                  font=("Segoe UI", 10)).pack(anchor="w")
@@ -1870,9 +2022,10 @@ class App(tk.Tk):
                      font=("Segoe UI", 10)).pack(side="left")
             return lbl
 
-        self._ok_lbl = stat_lbl("Thành công", COLOR_SUCCESS)
-        self._err_lbl = stat_lbl("Thất bại", COLOR_ERROR)
-        self._skip_lbl = stat_lbl("Đang chờ", COLOR_WARNING)
+        self._ok_lbl = stat_lbl("Đã đăng", COLOR_SUCCESS)
+        self._pending_lbl = stat_lbl("Chờ duyệt", COLOR_PENDING)
+        self._err_lbl = stat_lbl("Lỗi", COLOR_ERROR)
+        self._skip_lbl = stat_lbl("Còn lại", COLOR_TEXT_DIM)
 
         # Mini log in post tab
         tk.Label(right, text="Log nhanh:", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
@@ -1914,15 +2067,18 @@ class App(tk.Tk):
         self._post_btn.config(state="disabled")
         self._stop_btn.config(state="normal")
         self._ok_lbl.config(text="0")
+        self._pending_lbl.config(text="0")
         self._err_lbl.config(text="0")
         self._skip_lbl.config(text=str(len(groups)))
         self._progress_var.set(0)
         self._progress_label.config(text=f"0 / {len(groups)}")
         self._mini_log.clear()
         self._log(f"Bắt đầu đăng bài vào {len(groups)} nhóm…", "bold")
+        self._log("Chú thích: ✅ Đã đăng  |  ⏳ Chờ duyệt  |  ❌ Lỗi", "info")
 
         def _worker():
             ok_count = 0
+            pending_count = 0
             err_count = 0
             for idx, g in enumerate(groups):
                 if self._stop_flag:
@@ -1934,23 +2090,28 @@ class App(tk.Tk):
                 label = f"{gname} [{gid}]"
                 self.after(0, lambda n=label: self._log(f"→ Đang đăng: {n}…", "info"))
 
-                success, msg_result = self.backend.post_to_group(gid, message, image)
+                status, msg_result = self.backend.post_to_group(gid, message, image)
 
-                if success:
+                if status == "published":
                     ok_count += 1
+                elif status == "pending":
+                    pending_count += 1
                 else:
                     err_count += 1
+                    status = "failed"
 
                 remaining = len(groups) - idx - 1
                 pct = ((idx + 1) / len(groups)) * 100
                 check_url = f"https://www.facebook.com/groups/{gid}"
 
-                self.after(0, lambda ok=success, name=gname, gid_=gid, res=msg_result,
-                                      url=check_url,
-                                      o=ok_count, e=err_count, r=remaining, p=pct,
-                                      i=idx+1, t=len(groups): self._on_post_result(
-                    ok, name, gid_, res, url, o, e, r, p, i, t
-                ))
+                self.after(
+                    0,
+                    lambda st=status, name=gname, gid_=gid, res=msg_result, url=check_url,
+                           o=ok_count, pnd=pending_count, e=err_count, r=remaining,
+                           p=pct, i=idx + 1, t=len(groups): self._on_post_result(
+                        st, name, gid_, res, url, o, pnd, e, r, p, i, t
+                    ),
+                )
 
                 if idx < len(groups) - 1 and not self._stop_flag:
                     time.sleep(delay)
@@ -1959,18 +2120,26 @@ class App(tk.Tk):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_post_result(self, ok, name, gid, res, url, o, e, r, p, i, t):
+    def _on_post_result(self, status, name, gid, res, url, o, pnd, e, r, p, i, t):
         self._ok_lbl.config(text=str(o))
+        self._pending_lbl.config(text=str(pnd))
         self._err_lbl.config(text=str(e))
         self._skip_lbl.config(text=str(r))
         self._progress_var.set(p)
         self._progress_label.config(text=f"{i} / {t}")
-        tag = "ok" if ok else "err"
-        self._mini_log.log(f"{'✓' if ok else '✗'} {name} [{gid}]: {res}", tag)
-        self._log(f"[{i}/{t}] {'✅' if ok else '❌'} {name} [{gid}] — {res}", tag)
-        if ok:
-            self._log(f"    🔗 Kiểm tra nhóm: {url}", "info")
-            self._log(f"    📋 Copy ID: {gid}", "info")
+
+        if status == "published":
+            icon, tag, label = "✅", "ok", "ĐÃ ĐĂNG"
+        elif status == "pending":
+            icon, tag, label = "⏳", "pending", "CHỜ DUYỆT"
+        else:
+            icon, tag, label = "❌", "err", "LỖI"
+
+        self._mini_log.log(f"{icon} {name} [{gid}]: {res}", tag)
+        self._log(f"[{i}/{t}] {icon} {label} — {name} [{gid}]", tag)
+        self._log(f"    → {res}", tag)
+        self._log(f"    🔗 {url}", "info")
+        self._log(f"    📋 Copy ID: {gid}", "info")
 
     def _stop_posting(self):
         self._stop_flag = True
@@ -1982,9 +2151,19 @@ class App(tk.Tk):
         self._post_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
         ok = int(self._ok_lbl.cget("text"))
+        pnd = int(self._pending_lbl.cget("text"))
         err = int(self._err_lbl.cget("text"))
-        self._log(f"✅ Hoàn thành! {ok} thành công, {err} thất bại.", "bold")
-        messagebox.showinfo("Hoàn thành", f"Đã đăng bài xong!\n✅ {ok} thành công\n❌ {err} thất bại")
+        self._log(
+            f"✅ Hoàn thành! Đã đăng: {ok} | Chờ duyệt: {pnd} | Lỗi: {err}",
+            "bold",
+        )
+        messagebox.showinfo(
+            "Hoàn thành",
+            f"Kết quả đăng bài:\n\n"
+            f"✅ Đã đăng lên nhóm: {ok}\n"
+            f"⏳ Đang chờ admin duyệt: {pnd}\n"
+            f"❌ Lỗi / không đăng được: {err}",
+        )
 
     # ── LOG TAB ───────────────────────────────────────────────────────────────
 
