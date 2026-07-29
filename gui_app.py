@@ -23,7 +23,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
 MOBILE_URL = "https://mbasic.facebook.com"
 
@@ -682,16 +682,15 @@ class FacebookBackend:
                 except Exception:
                     pass
 
+        # Luôn thử GraphQL trước (kể cả khi có ảnh)
         methods = [
             ("GraphQL", self._post_via_graphql),
+            ("composer", self._post_via_composer_direct),
+            ("mbasic", self._post_via_mobile),
             ("m.facebook", self._post_via_m_composer),
-            ("permalink", self._post_via_permalink),
-            ("mobile", self._post_via_mobile),
         ]
         last_err = "Không thể đăng bài"
         for name, method in methods:
-            if image_path and name == "GraphQL":
-                continue
             _prog(f"Thử {name}…")
             try:
                 status, msg = method(group_id, message, image_path)
@@ -701,8 +700,136 @@ class FacebookBackend:
                 _prog(f"{name}: {msg}")
                 return status, msg
             last_err = msg or f"{name} thất bại"
-            _prog(f"{name} không được → thử cách khác")
+            _prog(f"{name}: {last_err}")
         return "failed", last_err
+
+    def _upload_photo(self, image_path: str, tokens: dict) -> str | None:
+        """Upload ảnh, trả về photo_id nếu thành công."""
+        path = Path(image_path)
+        if not path.is_file():
+            return None
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg")
+        if not uid or not fb_dtsg:
+            return None
+
+        self._use_desktop_session()
+        upload_urls = [
+            "https://www.facebook.com/ajax/react_composer/attachments/photo/upload",
+            "https://upload.facebook.com/ajax/react_composer/attachments/photo/upload",
+        ]
+        data = {
+            "fb_dtsg": fb_dtsg,
+            "__user": uid,
+            "__a": "1",
+            "source": "8",
+            "profile_id": uid,
+            "target_id": uid,
+        }
+        mime = "image/jpeg"
+        if path.suffix.lower() == ".png":
+            mime = "image/png"
+        elif path.suffix.lower() == ".gif":
+            mime = "image/gif"
+
+        for url in upload_urls:
+            try:
+                with open(path, "rb") as fh:
+                    resp = self.session.post(
+                        url,
+                        data=data,
+                        files={"farr": (path.name, fh, mime)},
+                        headers={
+                            **self.DESKTOP_HEADERS,
+                            "Origin": "https://www.facebook.com",
+                            "Referer": "https://www.facebook.com/",
+                        },
+                        timeout=30,
+                    )
+                text = resp.text
+                if text.startswith("for (;;);"):
+                    text = text[9:]
+                m = re.search(
+                    r'"photoID"\s*:\s*"?(\d+)"?|"photo_id"\s*:\s*"?(\d+)"?|"id"\s*:\s*"(\d{10,})"',
+                    text,
+                )
+                if m:
+                    return next(g for g in m.groups() if g)
+                # Thử parse JSON
+                try:
+                    j = json.loads(text)
+                    found, _ = self._walk_json_for_post(j)
+                    # walk tìm id - có thể lấy nhầm; tìm photoID riêng
+                    def find_photo(obj, depth=0):
+                        if depth > 10:
+                            return None
+                        if isinstance(obj, dict):
+                            for k in ("photoID", "photo_id", "fbid"):
+                                if k in obj and str(obj[k]).isdigit():
+                                    return str(obj[k])
+                            for v in obj.values():
+                                r = find_photo(v, depth + 1)
+                                if r:
+                                    return r
+                        elif isinstance(obj, list):
+                            for i in obj:
+                                r = find_photo(i, depth + 1)
+                                if r:
+                                    return r
+                        return None
+                    pid = find_photo(j)
+                    if pid:
+                        return pid
+                except Exception:
+                    pass
+            except Exception:
+                continue
+        return None
+
+    def _build_gql_variables(
+        self, group_id: str, message: str, uid: str, photo_id: str | None = None
+    ) -> dict:
+        sid = str(uuid.uuid4())
+        attachments = []
+        if photo_id:
+            attachments = [{"photo": {"id": str(photo_id)}}]
+        return {
+            "input": {
+                "composer_entry_point": "inline_composer",
+                "composer_source_surface": "group",
+                "composer_type": "group",
+                "logging": {"composer_session_id": sid},
+                "source": "WWW",
+                "message": {"ranges": [], "text": message},
+                "with_tags_ids": None,
+                "inline_style_ranges": [],
+                "text_format_preset_id": "0",
+                "group_id": str(group_id),
+                "audience": {"to_id": str(group_id)},
+                "actor_id": str(uid),
+                "client_mutation_id": "1",
+                "attachments": attachments,
+                "is_tags_user_selected": False,
+                "navigation_data": {
+                    "attribution_id_v2": (
+                        f"CometGroupDiscussionRoot.react,comet.group,"
+                        f"via_cold_start,{int(time.time() * 1000)},,,,"
+                    )
+                },
+            },
+            "feedLocation": "GROUP",
+            "feedbackSource": 0,
+            "focusCommentID": None,
+            "gridMediaWidth": None,
+            "groupID": str(group_id),
+            "scale": 1,
+            "privacySelectorRenderLocation": "COMET_STREAM",
+            "renderLocation": "group",
+            "useDefaultActor": False,
+            "isCrossposting": False,
+            "isFeed": False,
+            "isGroup": True,
+        }
 
     def _verify_post_status(self, group_id: str, message: str) -> str | None:
         """
@@ -872,76 +999,35 @@ class FacebookBackend:
                 ids.append(fid)
         return ids
 
-    def _build_gql_variables(self, group_id: str, message: str, uid: str) -> dict:
-        sid = str(uuid.uuid4())
-        return {
-            "input": {
-                "composer_entry_point": "inline_composer",
-                "composer_source_surface": "group",
-                "composer_type": "group",
-                "logging": {"composer_session_id": sid},
-                "source": "WWW",
-                "message": {"ranges": [], "text": message},
-                "with_tags_ids": None,
-                "inline_style_ranges": [],
-                "text_format_preset_id": "0",
-                "group_id": str(group_id),
-                "audience": {"to_id": str(group_id)},
-                "actor_id": str(uid),
-                "client_mutation_id": "1",
-                "attachments": [],
-                "is_tags_user_selected": False,
-                "navigation_data": {
-                    "attribution_id_v2": (
-                        f"CometGroupDiscussionRoot.react,comet.group,"
-                        f"via_cold_start,{int(time.time() * 1000)},,,,"
-                    )
-                },
-            },
-            "feedLocation": "GROUP",
-            "feedbackSource": 0,
-            "focusCommentID": None,
-            "gridMediaWidth": None,
-            "groupID": str(group_id),
-            "scale": 1,
-            "privacySelectorRenderLocation": "COMET_STREAM",
-            "renderLocation": "group",
-            "useDefaultActor": False,
-            "isCrossposting": False,
-            "isFeed": False,
-            "isGroup": True,
-        }
-
     def _post_via_graphql(
         self, group_id: str, message: str, image_path: str = None
     ) -> tuple[str, str]:
-        """Đăng bài qua GraphQL API (desktop cookies)."""
-        if image_path and Path(image_path).is_file():
-            return "failed", "skip ảnh → thử mobile"
-
+        """Đăng bài qua GraphQL API (desktop cookies) — hỗ trợ cả ảnh."""
         tokens = self._get_tokens()
         uid = tokens.get("__user") or self._get_user_id()
         fb_dtsg = tokens.get("fb_dtsg")
         if not fb_dtsg or not uid:
-            return "failed", "Không lấy được token (fb_dtsg)"
+            return "failed", "Không lấy được token (fb_dtsg) — lấy lại cookies"
 
         self._use_desktop_session()
         group_url = f"https://www.facebook.com/groups/{group_id}"
-        html = ""
         try:
             resp = self.session.get(group_url, timeout=12)
             html = resp.text
         except Exception as exc:
             return "failed", f"Không mở được trang nhóm: {exc}"
 
-        # Nhóm không cho đăng
         if re.search(r'only.?admins.?can.?post|chỉ admin.*đăng|you can.?t post', html, re.I):
             return "failed", "Nhóm chỉ cho admin đăng bài"
 
-        doc_ids = self._extract_composer_doc_ids(html)
-        variables = self._build_gql_variables(group_id, message, uid)
+        photo_id = None
+        if image_path and Path(image_path).is_file():
+            photo_id = self._upload_photo(image_path, tokens)
 
-        for doc_id in doc_ids[:3]:
+        doc_ids = self._extract_composer_doc_ids(html)
+        variables = self._build_gql_variables(group_id, message, uid, photo_id)
+
+        for doc_id in doc_ids[:5]:
             payload: dict = {
                 "av": uid,
                 "__user": uid,
@@ -970,19 +1056,133 @@ class FacebookBackend:
                     "https://www.facebook.com/api/graphql/",
                     data=payload,
                     headers=headers,
-                    timeout=12,
+                    timeout=15,
                 )
                 status, msg = self._analyze_post_response(gql_resp.text)
                 if status in ("published", "pending"):
+                    if photo_id and "ảnh" not in msg.lower():
+                        msg = f"{msg} (+ảnh)"
                     return status, msg
-                if status == "failed" and msg.startswith("Lỗi:"):
-                    # Một số doc_id sai — thử tiếp; lỗi quyền thì dừng
-                    if any(k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin")):
-                        return "failed", msg
+                if status == "failed" and any(
+                    k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin", "chỉ cho")
+                ):
+                    return "failed", msg
             except Exception:
                 continue
 
-        return "failed", "GraphQL không xác nhận được bài đăng (không có post ID)"
+        # Nếu có ảnh nhưng GraphQL fail — thử đăng text không ảnh
+        if photo_id:
+            variables = self._build_gql_variables(group_id, message, uid, None)
+            for doc_id in doc_ids[:3]:
+                payload = {
+                    "av": uid, "__user": uid, "__a": "1", "__comet_req": "15",
+                    "fb_dtsg": fb_dtsg,
+                    "fb_api_caller_class": "RelayModern",
+                    "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
+                    "variables": json.dumps(variables, ensure_ascii=False),
+                    "doc_id": doc_id,
+                }
+                if tokens.get("lsd"):
+                    payload["lsd"] = tokens["lsd"]
+                try:
+                    gql_resp = self.session.post(
+                        "https://www.facebook.com/api/graphql/",
+                        data=payload, headers=headers, timeout=15,
+                    )
+                    status, msg = self._analyze_post_response(gql_resp.text)
+                    if status in ("published", "pending"):
+                        return status, f"{msg} (text, ảnh upload lỗi)"
+                except Exception:
+                    continue
+
+        return "failed", "GraphQL: không nhận được post ID"
+
+    def _post_via_composer_direct(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[str, str]:
+        """Đăng trực tiếp qua mbasic composer (không cần scrape form)."""
+        tokens = self._get_tokens(force_refresh=False)
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg", "")
+        if not fb_dtsg:
+            tokens = self._get_tokens(force_refresh=True)
+            fb_dtsg = tokens.get("fb_dtsg", "")
+        if not fb_dtsg or not uid:
+            return "failed", "Thiếu fb_dtsg"
+
+        saved = dict(self.session.headers)
+        self._use_mobile_session()
+        try:
+            # Làm ấm session + lấy token mbasic
+            warm = self.session.get(f"{MOBILE_URL}/", timeout=12)
+            fields = self._extract_form_fields(warm.text)
+            if fields.get("fb_dtsg"):
+                fb_dtsg = fields["fb_dtsg"]
+            jazoest = fields.get("jazoest") or tokens.get("jazoest", "")
+
+            post_urls = [
+                f"{MOBILE_URL}/composer/mbasic/?c_src=group&target={group_id}&av={uid}",
+                f"{MOBILE_URL}/composer/mbasic/?target={group_id}&c_src=group",
+                f"https://m.facebook.com/composer/mbasic/?c_src=group&target={group_id}",
+            ]
+
+            data = {
+                "fb_dtsg": fb_dtsg,
+                "__user": uid,
+                "xc_message": message,
+                "target": str(group_id),
+                "c_src": "group",
+                "cwevent": "composer_entry",
+                "referrer": "group",
+                "ctype": "inline",
+                "cver": "amber",
+                "view_post": "Đăng",
+                "rst_ag": "1",
+            }
+            if jazoest:
+                data["jazoest"] = jazoest
+
+            for post_url in post_urls:
+                try:
+                    if image_path and Path(image_path).is_file():
+                        with open(image_path, "rb") as fh:
+                            resp = self.session.post(
+                                post_url, data=data,
+                                files={"file1": (Path(image_path).name, fh, "image/jpeg")},
+                                allow_redirects=True, timeout=25,
+                            )
+                    else:
+                        resp = self.session.post(
+                            post_url, data=data, allow_redirects=True, timeout=15,
+                        )
+                    status, msg = self._analyze_post_response(resp.text)
+                    if status in ("published", "pending"):
+                        return status, msg
+                    # Redirect về nhóm / story thường là thành công
+                    url_l = resp.url.lower()
+                    if any(k in url_l for k in ("story.php", "permalink", "/posts/", "pending")):
+                        if "pending" in url_l or "chờ" in resp.text.lower():
+                            return "pending", "Đang chờ admin duyệt"
+                        return "published", "Đã gửi bài (composer)"
+                    # HTML có dấu hiệu thành công
+                    if self._post_ok(resp.text):
+                        return "published", "Đã gửi bài (composer)"
+                    if any(k in resp.text.lower() for k in (
+                        "pending", "chờ duyệt", "awaiting approval",
+                        "your post has been submitted", "bài viết của bạn đã được gửi",
+                    )):
+                        return "pending", "Đang chờ admin duyệt"
+                except Exception:
+                    continue
+
+            return "failed", "Composer: không xác nhận được bài đăng"
+        except Exception as exc:
+            return "failed", f"Composer: {exc}"
+        finally:
+            self.session.headers.clear()
+            self.session.headers.update(saved)
+            if self._desktop_mode:
+                self._use_desktop_session()
 
     def _post_via_m_composer(
         self, group_id: str, message: str, image_path: str = None
@@ -1119,7 +1319,7 @@ class FacebookBackend:
     def _post_via_mobile(
         self, group_id: str, message: str, image_path: str = None
     ) -> tuple[str, str]:
-        """Fallback: đăng qua mbasic.facebook.com."""
+        """Đăng qua mbasic — tìm form compose linh hoạt hơn."""
         tokens = self._get_tokens()
         fb_dtsg = tokens.get("fb_dtsg", "")
         uid = tokens.get("__user") or self._get_user_id()
@@ -1129,49 +1329,63 @@ class FacebookBackend:
 
         try:
             urls_to_try = [
-                f"{MOBILE_URL}/groups/{group_id}/permalink/",
-                f"https://m.facebook.com/groups/{group_id}/permalink/",
+                f"{MOBILE_URL}/groups/{group_id}?view=permalink",
                 f"{MOBILE_URL}/groups/{group_id}/",
+                f"{MOBILE_URL}/composer/?c_src=group&target={group_id}",
+                f"https://m.facebook.com/groups/{group_id}/",
             ]
 
             html = ""
             for url in urls_to_try:
                 try:
                     resp = self.session.get(url, timeout=12, allow_redirects=True)
-                    if resp.status_code == 200:
-                        html = resp.text
-                        if "textarea" in html.lower() or "xc_message" in html:
-                            break
+                    if resp.status_code != 200:
+                        continue
+                    html = resp.text
+                    link_m = re.search(
+                        r'href="(/composer/[^"]*target=' + re.escape(str(group_id)) + r'[^"]*)"',
+                        html, re.I,
+                    )
+                    if not link_m:
+                        link_m = re.search(
+                            rf'href="(/groups/{group_id}/[^"]*(?:permalink|compose)[^"]*)"',
+                            html, re.I,
+                        )
+                    if not link_m:
+                        link_m = re.search(r'href="(/composer/[^"]+)"', html, re.I)
+                    if link_m:
+                        href = link_m.group(1).replace("&amp;", "&")
+                        compose_page = self.session.get(
+                            f"{MOBILE_URL}{href}" if href.startswith("/") else href,
+                            timeout=12, allow_redirects=True,
+                        )
+                        html = compose_page.text
+                    if "textarea" in html.lower() or "xc_message" in html or "fb_dtsg" in html:
+                        break
                 except Exception:
                     continue
 
             if not html:
-                return "failed", "Không truy cập trang nhóm (mobile)"
+                return "failed", "Không truy cập được trang nhóm (mbasic)"
 
             if re.search(r'only.?admins|chỉ admin.*đăng|you can.?t post', html, re.I):
                 return "failed", "Nhóm chỉ cho admin đăng bài"
 
-            action = self._find_form_action(html, group_id)
             fields = self._extract_form_fields(html)
-
-            if not action:
-                link_m = re.search(
-                    rf'href="(/groups/{group_id}/[^"]*(?:compose|permalink|post)[^"]*)"',
-                    html, re.I,
-                )
-                if link_m:
-                    r2 = self.session.get(f"{MOBILE_URL}{link_m.group(1)}", timeout=12)
-                    html = r2.text
-                    action = self._find_form_action(html, group_id)
-                    fields = self._extract_form_fields(html)
+            if fields.get("fb_dtsg"):
+                fb_dtsg = fields["fb_dtsg"]
 
             ta_m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I)
             msg_key = ta_m.group(1) if ta_m else "xc_message"
 
-            if not action and not fields:
-                return "failed", "Không tìm thấy form đăng bài"
+            action = self._find_form_action(html, group_id)
+            if not action:
+                action = f"/composer/mbasic/?c_src=group&target={group_id}&av={uid}"
 
             fields[msg_key] = message
+            fields["xc_message"] = message
+            fields["target"] = str(group_id)
+            fields["c_src"] = "group"
             if fb_dtsg:
                 fields["fb_dtsg"] = fb_dtsg
             if uid:
@@ -1185,32 +1399,28 @@ class FacebookBackend:
                     post_resp = self.session.post(
                         post_url, data=fields,
                         files={"file1": (Path(image_path).name, fh, "image/jpeg")},
-                        allow_redirects=True, timeout=20,
+                        allow_redirects=True, timeout=25,
                     )
             else:
                 post_resp = self.session.post(
-                    post_url, data=fields, allow_redirects=True, timeout=12,
+                    post_url, data=fields, allow_redirects=True, timeout=15,
                 )
 
             status, msg = self._analyze_post_response(post_resp.text)
             if status in ("published", "pending"):
                 return status, msg
-            if status == "failed" and msg:
-                return status, msg
-            pid = re.search(
-                r'(?:story_fbid|post_id|legacy_story_hideable_id)[=:]["\']?(\d{8,})',
-                post_resp.text,
-            )
-            if pid:
-                if any(k in post_resp.text.lower() for k in (
-                    "pending", "chờ duyệt", "awaiting approval",
-                )):
-                    return "pending", f"Đang chờ admin duyệt (post: {pid.group(1)})"
-                return "published", f"Đã đăng lên nhóm (post: {pid.group(1)})"
-
-            return "failed", "Mobile: không xác nhận được bài đăng (không có post ID)"
+            if self._post_ok(post_resp.text):
+                return "published", "Đã gửi bài (mbasic)"
+            if any(k in post_resp.text.lower() for k in (
+                "pending", "chờ duyệt", "awaiting approval",
+                "bài viết của bạn đã được gửi",
+            )):
+                return "pending", "Đang chờ admin duyệt"
+            if "login" in post_resp.url.lower():
+                return "failed", "Cookies hết hạn — lấy lại cookies"
+            return "failed", "mbasic: không xác nhận được bài đăng"
         except Exception as exc:
-            return "failed", f"Mobile: {exc}"
+            return "failed", f"mbasic: {exc}"
         finally:
             self.session.headers.clear()
             self.session.headers.update(saved_headers)
