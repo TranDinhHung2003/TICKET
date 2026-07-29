@@ -159,6 +159,60 @@ Xem file `examples/campaign.json` để hiểu cấu trúc.
 - **Quy định nhóm:** Hãy đọc và tuân thủ nội quy của từng nhóm trước khi đăng bài quảng cáo.
 - **Chính sách Facebook:** Sử dụng tool này phù hợp với [Điều khoản dịch vụ của Facebook](https://www.facebook.com/terms.php) và [Chính sách nền tảng](https://developers.facebook.com/policy/).
 
+---
+
+## Chế độ Session — Không cần Developer Account
+
+Nếu bạn chưa đăng ký Facebook Developer, hãy dùng chế độ **session** — đăng bài bằng cookies trình duyệt.
+
+### Cách 1: Đăng nhập trực tiếp (email + mật khẩu)
+
+```bash
+fb-poster session login
+# Nhập email và mật khẩu theo prompt
+# Cookies sẽ tự động lưu vào fb_cookies.json
+```
+
+> Facebook đôi khi yêu cầu xác minh bảo mật khi đăng nhập từ IP mới.
+> Trong trường hợp đó, dùng Cách 2 bên dưới.
+
+### Cách 2: Lấy cookies từ trình duyệt (khuyến nghị, ổn định hơn)
+
+1. Đăng nhập Facebook bình thường trên **Chrome** hoặc **Firefox**
+2. Cài extension **[Cookie-Editor](https://cookie-editor.cgagnier.ca/)** (miễn phí)
+3. Mở extension → tab **Export** → chọn **Export as Header String**
+4. Copy chuỗi cookies
+5. Chạy lệnh:
+
+```bash
+fb-poster session set-cookies 'c_user=123456789; xs=AbCdEf...; datr=XyZ...'
+```
+
+### Đăng bài sau khi có cookies
+
+```bash
+# Liệt kê nhóm
+fb-poster session list-groups --save groups.json
+
+# Đăng bài vào nhóm
+fb-poster session post -m "Nội dung quảng cáo" --groups-file groups.json
+
+# Đăng vào nhóm cụ thể
+fb-poster session post -m "Quảng cáo" --group-ids "123456,789012"
+
+# Đăng kèm ảnh
+fb-poster session post -m "Khuyến mãi!" --image banner.jpg --groups-file groups.json
+
+# Chạy thử
+fb-poster session post -m "Test" --group-ids "123456" --dry-run
+```
+
+### Cookies hết hạn?
+
+Cookies Facebook thường có hiệu lực **30–90 ngày**. Khi hết hạn, lặp lại Cách 2 để lấy cookies mới.
+
+---
+
 ## Xử lý lỗi thường gặp
 
 | Lỗi | Nguyên nhân | Giải pháp |

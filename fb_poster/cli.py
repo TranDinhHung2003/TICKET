@@ -14,6 +14,7 @@ from rich import print as rprint
 
 from .api import FacebookClient, FacebookAPIError
 from .poster import GroupPoster, PostConfig
+from .session_cli import session_cli
 
 load_dotenv()
 console = Console()
@@ -360,6 +361,9 @@ def post_batch(token, campaign_file, dry_run, verbose):
         f"[bold]Tổng kết:[/bold] "
         f"[green]{total_ok} thành công[/green] / [red]{total_fail} thất bại[/red]"
     )
+
+
+cli.add_command(session_cli)
 
 
 def main():
