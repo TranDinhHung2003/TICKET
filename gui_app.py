@@ -59,6 +59,36 @@ class FacebookBackend:
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
         self.logged_in = False
+        self._proxy = None
+
+    def set_proxy(self, proxy: str):
+        """Đặt proxy (http://host:port hoặc socks5://host:port)."""
+        if proxy:
+            self._proxy = {"http": proxy, "https": proxy}
+            self.session.proxies.update(self._proxy)
+        else:
+            self._proxy = None
+            self.session.proxies.clear()
+
+    def test_connection(self) -> tuple[bool, str]:
+        """Kiểm tra kết nối tới Facebook."""
+        test_urls = [
+            "https://mbasic.facebook.com/",
+            "https://m.facebook.com/",
+            "https://www.facebook.com/",
+        ]
+        for url in test_urls:
+            try:
+                r = self.session.get(url, timeout=10)
+                if r.status_code < 500:
+                    return True, url
+            except requests.exceptions.ProxyError:
+                return False, "proxy_error"
+            except requests.exceptions.SSLError:
+                return False, "ssl_error"
+            except Exception:
+                continue
+        return False, "unreachable"
 
     def load_cookies(self, path: Path) -> bool:
         if not path.exists():
@@ -89,19 +119,21 @@ class FacebookBackend:
         try:
             # Thử nhiều endpoint mobile của Facebook
             login_endpoints = [
-                f"{MOBILE_URL}/login/",
+                "https://mbasic.facebook.com/login/",
                 "https://m.facebook.com/login/",
-                f"{MOBILE_URL}/",
+                "https://mbasic.facebook.com/",
+                "https://www.facebook.com/login/",
             ]
 
             html = ""
             form_action = ""
+            last_exc = None
             for endpoint in login_endpoints:
                 try:
-                    resp = self.session.get(endpoint, timeout=30)
-                    if "login" in resp.text.lower() or "email" in resp.text.lower():
-                        html = resp.text
-                        # Tìm action của form login
+                    resp = self.session.get(endpoint, timeout=20)
+                    content = resp.text
+                    if "login" in content.lower() or "email" in content.lower() or "pass" in content.lower():
+                        html = content
                         m = re.search(
                             r'<form[^>]+action=["\']([^"\']*login[^"\']*)["\']',
                             html, re.I
@@ -109,11 +141,29 @@ class FacebookBackend:
                         if m:
                             form_action = m.group(1)
                         break
-                except Exception:
+                except requests.exceptions.ProxyError as e:
+                    last_exc = f"Lỗi proxy: {e}"
+                    break
+                except requests.exceptions.ConnectionError as e:
+                    last_exc = f"Không kết nối được: {e}"
+                    continue
+                except requests.exceptions.Timeout:
+                    last_exc = "Timeout kết nối"
+                    continue
+                except Exception as e:
+                    last_exc = str(e)
                     continue
 
             if not html:
-                return False, "Không thể kết nối tới Facebook. Kiểm tra mạng."
+                msg = last_exc or "Không rõ"
+                return False, (
+                    f"Không thể kết nối tới Facebook.\n\n"
+                    f"Chi tiết: {msg}\n\n"
+                    f"Giải pháp:\n"
+                    f"• Kiểm tra mạng Internet\n"
+                    f"• Dùng VPN nếu Facebook bị chặn\n"
+                    f"• Hoặc dùng tab 'Nhập Cookies' (không cần đăng nhập)"
+                )
 
             form_data = self._extract_form_fields(html)
 
@@ -444,17 +494,20 @@ class App(tk.Tk):
         self._tab_groups = tk.Frame(nb, bg=COLOR_BG)
         self._tab_post = tk.Frame(nb, bg=COLOR_BG)
         self._tab_log = tk.Frame(nb, bg=COLOR_BG)
+        self._tab_settings = tk.Frame(nb, bg=COLOR_BG)
 
         nb.add(self._tab_login, text="  🔑  Đăng nhập  ")
         nb.add(self._tab_groups, text="  👥  Nhóm của tôi  ")
         nb.add(self._tab_post, text="  📝  Đăng bài  ")
         nb.add(self._tab_log, text="  📋  Nhật ký  ")
+        nb.add(self._tab_settings, text="  ⚙️  Cài đặt  ")
 
         self._nb = nb
         self._build_login_tab()
         self._build_groups_tab()
         self._build_post_tab()
         self._build_log_tab()
+        self._build_settings_tab()
 
         if self.backend.logged_in:
             self._on_login_success_ui()
@@ -1007,6 +1060,148 @@ class App(tk.Tk):
 
     def _log(self, msg: str, tag: str = ""):
         self._full_log.log(msg, tag)
+
+    # ── SETTINGS TAB ──────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self):
+        tab = self._tab_settings
+
+        outer = tk.Frame(tab, bg=COLOR_BG)
+        outer.pack(expand=True, fill="both", padx=40, pady=20)
+
+        # ── Kiểm tra kết nối ──────────────────────────────────────────────
+        net_card = tk.LabelFrame(
+            outer, text="  Kết nối mạng  ",
+            bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 11, "bold"),
+            bd=1, relief="groove", padx=16, pady=12,
+        )
+        net_card.pack(fill="x", pady=(0, 16))
+
+        tk.Label(
+            net_card,
+            text="Kiểm tra xem app có kết nối được tới Facebook không:",
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 10),
+        ).pack(anchor="w")
+
+        self._net_status_var = tk.StringVar(value="")
+        tk.Label(net_card, textvariable=self._net_status_var,
+                 bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 10), wraplength=500).pack(anchor="w", pady=4)
+
+        HoverButton(
+            net_card, text="🔍  Kiểm tra kết nối", command=self._check_connection,
+            bg=COLOR_CARD, fg=COLOR_TEXT, relief="flat", cursor="hand2",
+            font=("Segoe UI", 10, "bold"), padx=14, pady=6,
+        ).pack(anchor="w", pady=(4, 0))
+
+        # ── Proxy / VPN ───────────────────────────────────────────────────
+        proxy_card = tk.LabelFrame(
+            outer, text="  Proxy / VPN  ",
+            bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 11, "bold"),
+            bd=1, relief="groove", padx=16, pady=12,
+        )
+        proxy_card.pack(fill="x", pady=(0, 16))
+
+        tk.Label(
+            proxy_card,
+            text=(
+                "Nếu Facebook bị chặn ở mạng của bạn, hãy nhập địa chỉ proxy:\n"
+                "Ví dụ:  http://127.0.0.1:8080   hoặc   socks5://127.0.0.1:1080"
+            ),
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 10),
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
+        proxy_row = tk.Frame(proxy_card, bg=COLOR_PANEL)
+        proxy_row.pack(fill="x")
+
+        tk.Label(proxy_row, text="Proxy URL:", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 10)).pack(side="left")
+
+        self._proxy_var = tk.StringVar()
+        proxy_entry = tk.Entry(
+            proxy_row, textvariable=self._proxy_var, width=40,
+            bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+            relief="flat", font=("Segoe UI", 10),
+        )
+        proxy_entry.pack(side="left", padx=(8, 8), ipady=5)
+
+        HoverButton(
+            proxy_row, text="Áp dụng", command=self._apply_proxy,
+            bg=COLOR_BUTTON, fg="white", relief="flat", cursor="hand2",
+            font=("Segoe UI", 10, "bold"), padx=12, pady=5,
+        ).pack(side="left")
+
+        HoverButton(
+            proxy_row, text="Xoá proxy", command=self._clear_proxy,
+            bg=COLOR_CARD, fg=COLOR_TEXT, relief="flat", cursor="hand2",
+            font=("Segoe UI", 10), padx=10, pady=5,
+        ).pack(side="left", padx=(6, 0))
+
+        self._proxy_status_var = tk.StringVar(value="")
+        tk.Label(proxy_card, textvariable=self._proxy_status_var,
+                 bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
+
+        # ── Hướng dẫn VPN miễn phí ───────────────────────────────────────
+        hint_card = tk.LabelFrame(
+            outer, text="  Nếu không có proxy — Dùng VPN miễn phí  ",
+            bg=COLOR_PANEL, fg=COLOR_TEXT, font=("Segoe UI", 11, "bold"),
+            bd=1, relief="groove", padx=16, pady=12,
+        )
+        hint_card.pack(fill="x")
+
+        hints = [
+            "1. Cài Psiphon (psiphon3.com) hoặc Lantern (getlantern.org) — miễn phí",
+            "2. Bật VPN lên, rồi mở lại app này",
+            "3. Hoặc dùng tab 'Nhập Cookies' — KHÔNG CẦN đăng nhập trong app",
+            "",
+            "👉 Cách dùng Cookies (đơn giản nhất, không cần VPN):",
+            "   • Đăng nhập Facebook trên Chrome bình thường",
+            "   • Cài extension 'Cookie-Editor' trên Chrome",
+            "   • Mở extension → Export → Header String → Copy",
+            "   • Quay lại tab Đăng nhập → tab Nhập Cookies → Dán → Xác nhận",
+        ]
+        for h in hints:
+            color = COLOR_WARNING if h.startswith("👉") else (COLOR_SUCCESS if h.startswith("   •") else COLOR_TEXT_DIM)
+            tk.Label(hint_card, text=h, bg=COLOR_PANEL, fg=color,
+                     font=("Segoe UI", 9), anchor="w", justify="left").pack(anchor="w")
+
+    def _check_connection(self):
+        self._net_status_var.set("🔄 Đang kiểm tra…")
+        self.update_idletasks()
+
+        def _worker():
+            ok, detail = self.backend.test_connection()
+            def _done():
+                if ok:
+                    self._net_status_var.set(f"✅ Kết nối OK → {detail}")
+                    self._net_status_var._label_fg = COLOR_SUCCESS
+                else:
+                    msgs = {
+                        "proxy_error": "❌ Lỗi proxy — kiểm tra địa chỉ proxy",
+                        "ssl_error": "❌ Lỗi SSL/HTTPS",
+                        "unreachable": "❌ Không kết nối được tới Facebook\n→ Thử bật VPN hoặc dùng proxy",
+                    }
+                    self._net_status_var.set(msgs.get(detail, f"❌ {detail}"))
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_proxy(self):
+        proxy = self._proxy_var.get().strip()
+        if not proxy:
+            messagebox.showwarning("Thiếu proxy", "Vui lòng nhập địa chỉ proxy.")
+            return
+        self.backend.set_proxy(proxy)
+        self._proxy_status_var.set(f"✅ Đang dùng proxy: {proxy}")
+        self._log(f"Đã đặt proxy: {proxy}", "warn")
+
+    def _clear_proxy(self):
+        self.backend.set_proxy("")
+        self._proxy_var.set("")
+        self._proxy_status_var.set("Đã xoá proxy — dùng kết nối trực tiếp")
+        self._log("Đã xoá proxy", "info")
 
     # ──────────────────────────────────────────────────────────────────────────
 
