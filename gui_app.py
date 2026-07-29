@@ -992,7 +992,7 @@ class FacebookBackend:
             "profile_id": uid,
             "target_id": uid,
             "waterfallxapp": "comet",
-            "upload_id": "jsc_c_a0",
+            "upload_id": f"jsc_c_{uuid.uuid4().hex[:8]}",
         }
         mime = "image/jpeg"
         if path.suffix.lower() == ".png":

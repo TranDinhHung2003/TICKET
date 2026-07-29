@@ -6,4 +6,5 @@ dist/
 *.spec.bak
 .fb_poster_cookies.json
 fb_cookies.json
+.fb_poster/
 .env
