@@ -23,7 +23,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -759,16 +759,9 @@ class FacebookBackend:
         marker = self._extract_verify_marker(message)
         if not marker:
             marker = uuid.uuid4().hex[:6]
-            message = f"{message.rstrip()}\n\n[FPV-{marker}]"
+            message = f"{message.rstrip()}\n\nFPV{marker}"
 
-        token = f"[FPV-{marker}]"
-        # Snapshot trước khi đăng (mbasic) — marker chưa được phép có
-        before_pending = self._fetch_verify_html(group_id, kind="pending")
-        before_feed = self._fetch_verify_html(group_id, kind="feed")
-        if token.lower() in (before_pending or "").lower() or token.lower() in (before_feed or "").lower():
-            _prog(f"Mã {token} đã có sẵn trên nhóm — tạo mã mới")
-            return "failed", f"Mã xác minh {token} đã tồn tại trên nhóm"
-
+        # Luôn GraphQL trước — đây là cách đã đăng được nhóm đầu
         methods = [
             ("GraphQL", self._post_via_graphql),
             ("mbasic", self._post_via_mobile),
@@ -776,14 +769,6 @@ class FacebookBackend:
             ("m.facebook", self._post_via_m_composer),
             ("Ajax", self._post_via_ajax_feed),
         ]
-        if self._used_post_ids:
-            methods = [
-                ("mbasic", self._post_via_mobile),
-                ("composer", self._post_via_composer_direct),
-                ("m.facebook", self._post_via_m_composer),
-                ("GraphQL", self._post_via_graphql),
-                ("Ajax", self._post_via_ajax_feed),
-            ]
 
         last_err = "Không thể đăng bài"
         for name, method in methods:
@@ -798,7 +783,6 @@ class FacebookBackend:
                 _prog(f"{name}: {last_err}")
                 continue
 
-            _prog(f"{name} báo {status} → xác minh {token} trên mbasic…")
             post_id = None
             m = re.search(
                 r"(?:post[:\s]*|Đăng[^(]*\()([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})",
@@ -811,9 +795,15 @@ class FacebookBackend:
             if post_id and (
                 str(post_id) == str(group_id) or str(post_id) in self._used_post_ids
             ):
-                _prog(f"{name}: post_id trùng/đã dùng → bỏ qua")
-                last_err = f"{name} trả post_id cũ — FB có thể chặn spam"
+                _prog(f"{name}: post_id trùng/đã dùng ({str(post_id)[:18]}) → bỏ qua")
+                last_err = f"{name} trả post_id cũ"
                 continue
+
+            _prog(
+                f"{name} báo {status}"
+                + (f" (post {post_id[:18]}…)" if post_id else "")
+                + " → kiểm tra permalink…"
+            )
 
             verified = None
             try:
@@ -823,8 +813,6 @@ class FacebookBackend:
                     post_id=post_id,
                     claimed=status,
                     marker=marker,
-                    before_pending=before_pending,
-                    before_feed=before_feed,
                 )
             except Exception as exc:
                 _prog(f"Xác minh lỗi: {exc}")
@@ -839,9 +827,9 @@ class FacebookBackend:
                     if verified == "published"
                     else "Đang chờ admin duyệt"
                 )
-                extra = f" ({token}, đã xác minh)"
+                extra = f" (FPV{marker})"
                 if post_id:
-                    extra = f" (post: {post_id[:24]}, {token})"
+                    extra = f" (post: {post_id[:24]})"
                 _prog(f"{name}: {label}{extra}")
                 try:
                     self.save_tokens()
@@ -850,24 +838,23 @@ class FacebookBackend:
                 return verified, f"{label}{extra}"
 
             last_err = (
-                f"{name} báo OK nhưng KHÔNG thấy {token} trên bài/hàng chờ mbasic"
+                f"{name} báo OK nhưng permalink/hàng chờ không xác nhận được bài"
                 + (f" — {msg}" if msg else "")
             )
             _prog(f"⚠ {last_err}")
+            # GraphQL trả id giả → đừng spam thêm method (tránh rối), thử method kế
 
         return "failed", last_err
 
     @staticmethod
     def _extract_verify_marker(message: str) -> str | None:
-        m = re.search(r"\[FPV-([a-z0-9]{6})\]", message or "", re.I)
-        if m:
-            return m.group(1).lower()
-        # tương thích bản cũ #hex (không dùng để xác minh mới)
-        return None
+        m = re.search(r"(?i)(?:\[FPV-([a-z0-9]{6})\]|FPV([a-z0-9]{6}))\b", message or "")
+        if not m:
+            return None
+        return (m.group(1) or m.group(2) or "").lower() or None
 
     @staticmethod
     def _strip_non_content_html(html: str) -> str:
-        """Bỏ script/style/textarea/input — tránh khớp nhầm ô soạn bài / CSS."""
         if not html:
             return ""
         out = re.sub(r"<script\b[^>]*>.*?</script>", " ", html, flags=re.I | re.S)
@@ -875,54 +862,167 @@ class FacebookBackend:
         out = re.sub(r"<textarea\b[^>]*>.*?</textarea>", " ", out, flags=re.I | re.S)
         out = re.sub(r"<input\b[^>]*>", " ", out, flags=re.I)
         out = re.sub(r"<select\b[^>]*>.*?</select>", " ", out, flags=re.I | re.S)
-        # Bỏ attribute style="color:#xxxxxx" còn sót
         out = re.sub(r'style\s*=\s*"[^"]*"', " ", out, flags=re.I)
         out = re.sub(r"style\s*=\s*'[^']*'", " ", out, flags=re.I)
         return out
 
-    def _fetch_verify_html(self, group_id: str, kind: str = "pending") -> str:
-        """Lấy HTML mbasic đã làm sạch để xác minh."""
-        gid = str(group_id)
-        if kind == "pending":
-            urls = [
-                f"https://mbasic.facebook.com/groups/{gid}/pending",
-                f"https://mbasic.facebook.com/groups/{gid}?view=pending",
-            ]
-        else:
-            urls = [
-                f"https://mbasic.facebook.com/groups/{gid}",
-                f"https://mbasic.facebook.com/groups/{gid}/?refid=18",
-            ]
-        self._use_desktop_session()
-        # mbasic cần mobile UA
-        saved = dict(self.session.headers)
-        try:
-            self._use_mobile_session()
-            for url in urls:
-                try:
-                    resp = self.session.get(url, timeout=12, allow_redirects=True)
-                    if resp.status_code >= 400:
-                        continue
-                    final = resp.url.lower()
-                    if "login" in final:
-                        continue
-                    if f"/groups/{gid}" not in final:
-                        continue
-                    return self._strip_non_content_html(resp.text)
-                except Exception:
-                    continue
-        finally:
-            self.session.headers.clear()
-            self.session.headers.update(saved)
-            if self._desktop_mode:
-                self._use_desktop_session()
-        return ""
+    def _message_anchors(self, message: str, marker: str | None = None) -> list[str]:
+        """Chuỗi đặc trưng để tìm bài (marker + 1 dòng nội dung dài)."""
+        anchors: list[str] = []
+        mk = (marker or self._extract_verify_marker(message) or "").lower()
+        if mk:
+            anchors.append(f"fpv{mk}")
+            anchors.append(f"[fpv-{mk}]")
+        for line in (message or "").split("\n"):
+            line = re.sub(r"\s+", " ", line).strip()
+            if re.search(r"(?i)fpv[a-z0-9]{6}", line):
+                continue
+            if len(line) >= 18 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
+                anchors.append(line[:56].lower())
+                break
+        return list(dict.fromkeys(a for a in anchors if a))
 
-    def _marker_in_html(self, html: str, marker: str) -> bool:
-        if not html or not marker:
-            return False
-        token = f"[fpv-{marker.lower()}]"
-        return token in html.lower()
+    def _page_unavailable(self, html: str, final_url: str) -> bool:
+        low = (html or "")[:3000].lower()
+        final = (final_url or "").lower()
+        if "login" in final and "login.php" in final:
+            return True
+        return any(
+            x in low
+            for x in (
+                "content isn't available",
+                "this content isn't available",
+                "nội dung không khả dụng",
+                "không khả dụng",
+                "page isn't available",
+            )
+        )
+
+    def _verify_permalink(
+        self, group_id: str, post_id: str, anchors: list[str]
+    ) -> str | None:
+        """
+        Xác minh post_id mở được ĐÚNG trên nhóm này.
+        Redirect sang nhóm khác / unavailable → fail (chặn echo bài nhóm 1).
+        """
+        if not post_id or not str(post_id).isdigit():
+            return None
+        gid = str(group_id)
+        pid = str(post_id)
+        candidates = [
+            f"https://www.facebook.com/groups/{gid}/posts/{pid}",
+            f"https://www.facebook.com/groups/{gid}/permalink/{pid}/",
+            f"https://mbasic.facebook.com/story.php?story_fbid={pid}&id={gid}",
+            f"https://m.facebook.com/story.php?story_fbid={pid}&id={gid}",
+            f"https://mbasic.facebook.com/groups/{gid}/permalink/{pid}/",
+        ]
+        self._use_desktop_session()
+        for url in candidates:
+            try:
+                # Một số URL cần mobile UA
+                if "mbasic." in url or "m.facebook." in url:
+                    saved = dict(self.session.headers)
+                    self._use_mobile_session()
+                    try:
+                        resp = self.session.get(url, timeout=14, allow_redirects=True)
+                    finally:
+                        self.session.headers.clear()
+                        self.session.headers.update(saved)
+                        if self._desktop_mode:
+                            self._use_desktop_session()
+                else:
+                    resp = self.session.get(url, timeout=14, allow_redirects=True)
+                if resp.status_code >= 400:
+                    continue
+                final = resp.url
+                html = resp.text
+                if self._page_unavailable(html, final):
+                    continue
+                final_l = final.lower()
+                # Bắt buộc còn thuộc đúng group_id (không redirect sang nhóm khác)
+                on_group = (
+                    f"/groups/{gid}" in final_l
+                    or f"id={gid}" in final_l
+                    or f"%2fgroups%2f{gid}" in final_l
+                )
+                if not on_group:
+                    continue
+                # Không được nhảy sang groups/OTHER_ID/
+                other = re.search(r"/groups/(\d+)", final_l)
+                if other and other.group(1) != gid:
+                    continue
+
+                cleaned = self._strip_non_content_html(html).lower()
+                raw_l = html.lower()
+                # post_id xuất hiện + (anchor nội dung hoặc trang story rõ)
+                has_pid = pid in html
+                has_anchor = any(a in cleaned or a in raw_l for a in anchors) if anchors else False
+                looks_story = any(
+                    k in raw_l
+                    for k in (
+                        "story_permalink",
+                        "m_story_permalink",
+                        "legacy_story_hideable_id",
+                        "story.php",
+                        "pending",
+                        "chờ",
+                    )
+                )
+                if has_pid and (has_anchor or looks_story):
+                    if "pending" in final_l or "pending" in cleaned[:4000] or "chờ duyệt" in cleaned:
+                        return "pending"
+                    # Nhóm duyệt bài: permalink mở được thường là đã gửi (có thể đang chờ)
+                    if has_anchor:
+                        return "published"
+                    return "pending" if "group" in final_l else "published"
+            except Exception:
+                continue
+        return None
+
+    def _verify_pending_or_feed(
+        self, group_id: str, anchors: list[str], claimed: str | None
+    ) -> str | None:
+        """Tìm anchor trên pending/feed mbasic + desktop pending."""
+        if not anchors:
+            return None
+        gid = str(group_id)
+        checks = [
+            ("pending", f"https://mbasic.facebook.com/groups/{gid}/pending"),
+            ("pending", f"https://m.facebook.com/groups/{gid}/pending"),
+            ("pending", f"https://www.facebook.com/groups/{gid}/pending_posts"),
+            ("feed", f"https://mbasic.facebook.com/groups/{gid}"),
+            ("feed", f"https://www.facebook.com/groups/{gid}"),
+        ]
+        for kind, url in checks:
+            try:
+                if "mbasic." in url or url.startswith("https://m."):
+                    saved = dict(self.session.headers)
+                    self._use_mobile_session()
+                    try:
+                        resp = self.session.get(url, timeout=12, allow_redirects=True)
+                    finally:
+                        self.session.headers.clear()
+                        self.session.headers.update(saved)
+                        if self._desktop_mode:
+                            self._use_desktop_session()
+                else:
+                    self._use_desktop_session()
+                    resp = self.session.get(url, timeout=12, allow_redirects=True)
+                if resp.status_code >= 400:
+                    continue
+                final = resp.url.lower()
+                if "login" in final:
+                    continue
+                if f"/groups/{gid}" not in final:
+                    continue
+                cleaned = self._strip_non_content_html(resp.text).lower()
+                if any(a in cleaned for a in anchors):
+                    if kind == "pending" or "pending" in final:
+                        return "pending"
+                    return "pending" if claimed == "pending" else "published"
+            except Exception:
+                continue
+        return None
 
     def _verify_post_status(
         self,
@@ -935,91 +1035,27 @@ class FacebookBackend:
         before_feed: str | None = None,
     ) -> str | None:
         """
-        Chỉ OK khi [FPV-xxx] xuất hiện MỚI trên mbasic pending/feed
-        (so với snapshot trước khi đăng). Không tin post_id / CSS #hex.
+        Ưu tiên: permalink post_id đúng nhóm.
+        Phụ: thấy nội dung/marker trên pending/feed.
         """
         marker = (marker or self._extract_verify_marker(message) or "").lower()
-        if not marker:
-            return None
-        token = f"[FPV-{marker}]"
+        anchors = self._message_anchors(message, marker)
 
         for attempt in range(5):
             if attempt:
-                time.sleep(2.2)
+                time.sleep(2.0)
             else:
-                time.sleep(1.5)
+                time.sleep(1.2)
 
-            # 1) Permalink mbasic theo post_id (nếu có) — phải có marker
-            if post_id and str(post_id).isdigit():
-                story = self._fetch_story_html(group_id, post_id)
-                if story and self._marker_in_html(story, marker):
-                    if claimed == "pending" or "pending" in story.lower()[:3000]:
-                        return "pending"
-                    return "published"
+            if post_id:
+                found = self._verify_permalink(group_id, post_id, anchors)
+                if found:
+                    return found
 
-            # 2) Pending mbasic — marker mới so với before
-            pending = self._fetch_verify_html(group_id, kind="pending")
-            if self._marker_in_html(pending, marker):
-                if before_pending and self._marker_in_html(before_pending, marker):
-                    pass  # đã có từ trước → không tính
-                else:
-                    return "pending"
-
-            # 3) Feed mbasic — marker mới
-            feed = self._fetch_verify_html(group_id, kind="feed")
-            if self._marker_in_html(feed, marker):
-                if before_feed and self._marker_in_html(before_feed, marker):
-                    pass
-                else:
-                    return "published" if claimed != "pending" else "pending"
-
+            found = self._verify_pending_or_feed(group_id, anchors, claimed)
+            if found:
+                return found
         return None
-
-    def _fetch_story_html(self, group_id: str, post_id: str) -> str:
-        gid = str(group_id)
-        pid = str(post_id)
-        urls = [
-            f"https://mbasic.facebook.com/story.php?story_fbid={pid}&id={gid}",
-            f"https://mbasic.facebook.com/groups/{gid}/permalink/{pid}/",
-        ]
-        saved = dict(self.session.headers)
-        try:
-            self._use_mobile_session()
-            for url in urls:
-                try:
-                    resp = self.session.get(url, timeout=12, allow_redirects=True)
-                    if resp.status_code >= 400:
-                        continue
-                    final = resp.url.lower()
-                    low = resp.text.lower()
-                    if "login" in final:
-                        continue
-                    if any(
-                        x in low[:2500]
-                        for x in (
-                            "content isn't available",
-                            "nội dung không",
-                            "this content isn't available",
-                            "không khả dụng",
-                        )
-                    ):
-                        continue
-                    # Phải còn gắn với group hoặc story_fbid
-                    if (
-                        f"/groups/{gid}" not in final
-                        and f"id={gid}" not in final
-                        and f"story_fbid={pid}" not in final
-                    ):
-                        continue
-                    return self._strip_non_content_html(resp.text)
-                except Exception:
-                    continue
-        finally:
-            self.session.headers.clear()
-            self.session.headers.update(saved)
-            if self._desktop_mode:
-                self._use_desktop_session()
-        return ""
 
     def _upload_photo(self, image_path: str, tokens: dict) -> str | None:
         """Upload ảnh, trả về photo_id nếu thành công."""
@@ -1114,7 +1150,13 @@ class FacebookBackend:
         return None
 
     def _build_gql_variables(
-        self, group_id: str, message: str, uid: str, photo_id: str | None = None
+        self,
+        group_id: str,
+        message: str,
+        uid: str,
+        photo_id: str | None = None,
+        *,
+        entry_point: str = "inline_composer",
     ) -> dict:
         """Payload GraphQL theo format đã chạy được trên nhiều tool cookies."""
         sid = str(uuid.uuid4())
@@ -1123,7 +1165,7 @@ class FacebookBackend:
             attachments = [{"photo": {"id": str(photo_id)}}]
         return {
             "input": {
-                "composer_entry_point": "inline_composer",
+                "composer_entry_point": entry_point,
                 "composer_source_surface": "group",
                 "composer_type": "group",
                 "idempotence_token": f"{uuid.uuid4()}_FEED",
@@ -1176,6 +1218,12 @@ class FacebookBackend:
 
         low = text.lower()
         gid = str(group_id) if group_id else ""
+
+        # story_create null / bị chặn — không nhận là thành công
+        if re.search(r'"story_create"\s*:\s*null', text):
+            return "failed", "GraphQL: story_create=null (FB chặn hoặc từ chối bài)"
+        if re.search(r'"story_create"\s*:\s*\{\s*\}', text):
+            return "failed", "GraphQL: story_create rỗng"
 
         # Lỗi CRITICAL (bỏ qua WARNING relay)
         for chunk in text.split("\n"):
@@ -1299,11 +1347,13 @@ class FacebookBackend:
     def _post_via_graphql(
         self, group_id: str, message: str, image_path: str = None
     ) -> tuple[str, str]:
-        """Đăng bài qua GraphQL — format payload giống tool cookies thực tế."""
-        # Luôn refresh token từ trang nhóm
+        """Đăng bài qua GraphQL — chỉ trả OK khi permalink post_id mở được đúng nhóm."""
         self._use_desktop_session()
         group_url = f"https://www.facebook.com/groups/{group_id}"
         try:
+            # Làm ấm + lấy token mới từ đúng nhóm
+            self.session.get("https://www.facebook.com/", timeout=12)
+            time.sleep(0.6)
             resp = self.session.get(group_url, timeout=15)
             html = resp.text
         except Exception as exc:
@@ -1323,21 +1373,26 @@ class FacebookBackend:
 
         photo_id = None
         if image_path and Path(image_path).is_file():
-            # Gắn token mới vào upload
             up_tokens = {"__user": uid, "fb_dtsg": fb_dtsg, **tokens}
             photo_id = self._upload_photo(image_path, up_tokens)
+            time.sleep(0.8)
 
         doc_ids = self._extract_composer_doc_ids(html)
+        entry_points = ["inline_composer", "group", "feed"]
+        anchors = self._message_anchors(message)
         last_hint = ""
+        claimed_unverified = 0
 
-        for doc_id in doc_ids[:8]:
-            # Variables mới mỗi lần thử — tránh FB echo mutation cũ
-            variables = self._build_gql_variables(group_id, message, uid, photo_id)
+        def _try_once(doc_id: str, ph_id: str | None, entry: str) -> tuple[str, str] | None:
+            nonlocal last_hint, claimed_unverified
+            variables = self._build_gql_variables(
+                group_id, message, uid, ph_id, entry_point=entry
+            )
             payload: dict = {
                 "av": uid,
                 "__user": uid,
                 "__a": "1",
-                "__req": "1",
+                "__req": str(uuid.uuid4().hex[:4]),
                 "__comet_req": "15",
                 "fb_dtsg": fb_dtsg,
                 "fb_api_caller_class": "RelayModern",
@@ -1350,7 +1405,6 @@ class FacebookBackend:
                 payload["lsd"] = tokens["lsd"]
             if tokens.get("jazoest"):
                 payload["jazoest"] = tokens["jazoest"]
-
             headers = {
                 **self.DESKTOP_HEADERS,
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -1364,64 +1418,77 @@ class FacebookBackend:
                     "https://www.facebook.com/api/graphql/",
                     data=payload,
                     headers=headers,
-                    timeout=20,
+                    timeout=22,
                 )
-                status, msg = self._analyze_post_response(gql_resp.text, group_id=group_id)
-                if status in ("published", "pending"):
-                    if photo_id:
-                        msg = f"{msg} (+ảnh)"
+            except Exception as exc:
+                last_hint = str(exc)
+                return None
+
+            status, msg = self._analyze_post_response(gql_resp.text, group_id=group_id)
+            if status == "failed":
+                if any(
+                    k in msg.lower()
+                    for k in ("permission", "quyền", "not allowed", "admin", "chỉ cho")
+                ):
+                    return ("failed", msg)
+                last_hint = msg
+                return None
+            if status not in ("published", "pending"):
+                if msg:
+                    last_hint = msg[:120]
+                return None
+
+            # Bắt buộc kiểm tra permalink ngay — lọc post_id giả
+            m = re.search(r"\(([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})\)", msg)
+            post_id = m.group(1) if m else None
+            if post_id and post_id in self._used_post_ids:
+                claimed_unverified += 1
+                last_hint = f"post_id đã dùng {post_id[:16]}"
+                return None
+            if post_id:
+                time.sleep(1.0)
+                verified = self._verify_permalink(group_id, post_id, anchors)
+                if verified:
+                    tag = f"{msg}"
+                    if ph_id:
+                        tag += " (+ảnh)"
                     try:
                         self._tokens_cache = {**tokens, "__user": uid, "fb_dtsg": fb_dtsg}
                         self._tokens_cache_time = time.time()
                         self.save_tokens()
                     except Exception:
                         pass
-                    return status, msg
-                if status == "failed":
-                    if any(k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin", "chỉ cho")):
-                        return "failed", msg
-                    last_hint = msg
-                elif status == "unknown" and msg:
-                    last_hint = msg[:100]
-            except Exception as exc:
-                last_hint = str(exc)
-                continue
+                    return (verified, tag)
+                claimed_unverified += 1
+                last_hint = f"permalink không mở được post {post_id[:18]}"
+                return None
 
-        # Text-only retry nếu upload ảnh fail
-        if photo_id:
-            for doc_id in doc_ids[:4]:
-                variables = self._build_gql_variables(group_id, message, uid, None)
-                payload = {
-                    "av": uid, "__user": uid, "__a": "1", "__comet_req": "15",
-                    "fb_dtsg": fb_dtsg,
-                    "fb_api_caller_class": "RelayModern",
-                    "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
-                    "variables": json.dumps(variables, ensure_ascii=False),
-                    "doc_id": doc_id,
-                }
-                if tokens.get("lsd"):
-                    payload["lsd"] = tokens["lsd"]
-                try:
-                    gql_resp = self.session.post(
-                        "https://www.facebook.com/api/graphql/",
-                        data=payload,
-                        headers={
-                            **self.DESKTOP_HEADERS,
-                            "Content-Type": "application/x-www-form-urlencoded",
-                            "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
-                            "Origin": "https://www.facebook.com",
-                            "Referer": group_url + "/",
-                        },
-                        timeout=20,
-                    )
-                    status, msg = self._analyze_post_response(gql_resp.text, group_id=group_id)
-                    if status in ("published", "pending"):
-                        return status, f"{msg} (chỉ text)"
-                except Exception:
-                    continue
+            # Có pending hint nhưng không có id — để post_to_group xác minh feed
+            return (status, msg)
+
+        # Thử ảnh + text với nhiều entry/doc
+        for entry in entry_points:
+            for doc_id in doc_ids[:6]:
+                result = _try_once(doc_id, photo_id, entry)
+                if result:
+                    return result
+                time.sleep(0.35)
+
+        # Text-only (ảnh đôi khi khiến FB trả id giả)
+        for entry in entry_points[:2]:
+            for doc_id in doc_ids[:5]:
+                result = _try_once(doc_id, None, entry)
+                if result:
+                    st, msg = result
+                    if st != "failed":
+                        return st, f"{msg} (chỉ text)"
+                    return result
+                time.sleep(0.35)
 
         hint = f" — {last_hint}" if last_hint else ""
-        return "failed", f"GraphQL không nhận post ID{hint}"
+        if claimed_unverified:
+            hint += f" | {claimed_unverified} lần FB trả id nhưng permalink fail"
+        return "failed", f"GraphQL không tạo được bài thật{hint}"
 
     def _post_via_ajax_feed(
         self, group_id: str, message: str, image_path: str = None
@@ -2774,7 +2841,7 @@ class App(tk.Tk):
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(
             left,
-            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  — mỗi nhóm gắn [FPV-xxxxxx], xác minh trên mbasic",
+            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  — mỗi nhóm 1 dòng FPV riêng, kiểm tra permalink",
             bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10),
         ).pack(anchor="w", pady=(4, 12))
 
@@ -2931,15 +2998,27 @@ class App(tk.Tk):
             self._persist_draft()
             self._log(f"Đã lưu ảnh: {cached}", "ok")
 
-    def _unique_message(self, message: str, group_id: str, index: int = 1) -> str:
+    def _unique_message(
+        self, message: str, group_id: str, index: int = 1, group_name: str = ""
+    ) -> str:
         """
-        Gắn mã [FPV-xxxxxx] riêng mỗi nhóm.
-        Dùng xác minh thật (không dùng #hex — dễ trùng màu CSS).
+        Làm mỗi bài khác nhau rõ (FB chặn nội dung trùng giữa các nhóm).
         """
-        base = re.sub(r"(?m)\n*\[FPV-[a-z0-9]{6}\]\s*$", "", message or "", flags=re.I)
-        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", base, flags=re.I).rstrip()
+        base = re.sub(r"(?mi)\n*(?:\[FPV-[a-z0-9]{6}\]|FPV[a-z0-9]{6})\s*$", "", message or "")
+        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", base).rstrip()
+        # Bỏ dòng unique cũ nếu chạy lại
+        base = re.sub(
+            r"(?m)\n*[▪️•●◆▪]\s*\d{6}-\d+\s+FPV[a-z0-9]{6}\s*$",
+            "",
+            base,
+        ).rstrip()
         code = uuid.uuid4().hex[:6]
-        return f"{base}\n\n[FPV-{code}]"
+        ts = time.strftime("%H%M%S")
+        bullets = ["▪️", "•", "●", "◆", "▪"]
+        bullet = bullets[(index - 1) % len(bullets)]
+        tail_gid = str(group_id)[-4:]
+        # Unique ở CUỐI — đủ khác để tránh spam filter, vẫn đọc được
+        return f"{base}\n\n{bullet} {ts}-{index}/{tail_gid} FPV{code}"
 
     def _get_selected_groups(self) -> list[dict]:
         return [g for var, g in self._group_vars if var.get()]
@@ -3006,7 +3085,7 @@ class App(tk.Tk):
         self._tick_timer()
 
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
-        self._live("Mỗi nhóm có mã [FPV-xxxxxx] — chỉ OK khi thấy mã trên mbasic pending/feed", "info")
+        self._live("GraphQL + kiểm tra permalink đúng nhóm | mỗi bài có dòng FPV riêng", "info")
         self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
@@ -3022,7 +3101,9 @@ class App(tk.Tk):
                 gname = g.get("name", gid)
                 n = idx + 1
                 t = len(groups)
-                msg_for_group = self._unique_message(message, gid, index=n)
+                msg_for_group = self._unique_message(
+                    message, gid, index=n, group_name=gname
+                )
                 marker = self.backend._extract_verify_marker(msg_for_group) or "?"
 
                 def _prog(msg, _n=n, _t=t, _name=gname, _gid=gid):
@@ -3034,7 +3115,7 @@ class App(tk.Tk):
                 self.after(
                     0,
                     lambda: self._live(
-                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (mã [FPV-{marker}])…", "info"
+                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (FPV{marker})…", "info"
                     ),
                 )
 
