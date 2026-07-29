@@ -123,10 +123,62 @@ class FacebookBackend:
         self._used_post_ids: set[str] = set()
 
     def reset_batch_state(self):
-        """Gọi trước mỗi lần đăng hàng loạt."""
+        """Gọi trước mỗi lần đăng hàng loạt — xóa cache đăng bài cũ."""
         self._used_post_ids.clear()
         self._tokens_cache.clear()
         self._tokens_cache_time = 0.0
+        # Xóa tokens.json cũ — tránh tái dùng fb_dtsg từ lần chạy trước
+        try:
+            if TOKENS_FILE.exists():
+                TOKENS_FILE.unlink()
+        except Exception:
+            pass
+
+    def clear_posting_cache(self):
+        """Xóa toàn bộ cache đăng bài (token/dtsg), giữ cookies đăng nhập."""
+        self.reset_batch_state()
+        self._tokens_cache.clear()
+
+    def refresh_session_for_group(self, group_id: str) -> tuple[bool, str]:
+        """
+        Làm mới session trước mỗi nhóm:
+        - Nạp lại cookies từ đĩa (bỏ state bẩn trong RAM)
+        - Xóa token cache
+        - Mở trang nhóm để lấy fb_dtsg mới
+        """
+        self._tokens_cache.clear()
+        self._tokens_cache_time = 0.0
+
+        # Reload cookies sạch từ file đã lưu
+        cookie_path = COOKIES_FILE if COOKIES_FILE.exists() else LEGACY_COOKIES_FILE
+        if cookie_path.exists():
+            try:
+                data = json.loads(cookie_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("c_user"):
+                    self._apply_cookies(data)
+            except Exception as exc:
+                return False, f"Không nạp lại cookies: {exc}"
+
+        self._use_desktop_session()
+        try:
+            # Làm mới cookie session với Facebook
+            self.session.get("https://www.facebook.com/", timeout=12)
+            time.sleep(0.5)
+            resp = self.session.get(
+                f"https://www.facebook.com/groups/{group_id}",
+                timeout=15,
+            )
+            tokens = self._extract_fb_tokens(resp.text)
+            if tokens.get("fb_dtsg"):
+                self._tokens_cache = {
+                    **tokens,
+                    "__user": self._get_user_id(),
+                }
+                self._tokens_cache_time = time.time()
+                return True, "ok"
+            return False, "Không lấy được fb_dtsg mới từ trang nhóm"
+        except Exception as exc:
+            return False, str(exc)
 
     def set_proxy(self, proxy: str):
         """Đặt proxy (http://host:port hoặc socks5://host:port)."""
@@ -757,12 +809,17 @@ class FacebookBackend:
         self._tokens_cache.clear()
         self._tokens_cache_time = 0.0
 
+        # Làm mới cookies + fb_dtsg từ đúng nhóm (tránh data cũ)
+        ok_refresh, refresh_msg = self.refresh_session_for_group(group_id)
+        if not ok_refresh:
+            _prog(f"Cảnh báo làm mới session: {refresh_msg}")
+
         marker = self._extract_verify_marker(message)
         if not marker:
             marker = uuid.uuid4().hex[:6]
             message = f"{message.rstrip()}\n\nFPV{marker}"
 
-        # Luôn GraphQL trước — đây là cách đã đăng được nhóm đầu
+        # Nhóm đầu: GraphQL. Nhóm 2+: mbasic trước (GraphQL hay trả id giả từ cache)
         methods = [
             ("GraphQL", self._post_via_graphql),
             ("mbasic", self._post_via_mobile),
@@ -770,6 +827,14 @@ class FacebookBackend:
             ("m.facebook", self._post_via_m_composer),
             ("Ajax", self._post_via_ajax_feed),
         ]
+        if self._used_post_ids:
+            methods = [
+                ("mbasic", self._post_via_mobile),
+                ("GraphQL", self._post_via_graphql),
+                ("composer", self._post_via_composer_direct),
+                ("m.facebook", self._post_via_m_composer),
+                ("Ajax", self._post_via_ajax_feed),
+            ]
 
         last_err = "Không thể đăng bài"
         for name, method in methods:
@@ -832,10 +897,7 @@ class FacebookBackend:
                 if post_id:
                     extra = f" (post: {post_id[:24]})"
                 _prog(f"{name}: {label}{extra}")
-                try:
-                    self.save_tokens()
-                except Exception:
-                    pass
+                # Không ghi tokens.json giữa batch — tránh dtsg cũ làm hỏng nhóm sau
                 return verified, f"{label}{extra}"
 
             last_err = (
@@ -843,7 +905,6 @@ class FacebookBackend:
                 + (f" — {msg}" if msg else "")
             )
             _prog(f"⚠ {last_err}")
-            # GraphQL trả id giả → đừng spam thêm method (tránh rối), thử method kế
 
         return "failed", last_err
 
@@ -1204,6 +1265,53 @@ class FacebookBackend:
             "UFI2CommentsProvider_commentsKey": "CometGroupDiscussionRootSuccessQuery",
         }
 
+    def _find_story_create_nodes(self, obj, depth: int = 0) -> list:
+        if depth > 12 or obj is None:
+            return []
+        found = []
+        if isinstance(obj, dict):
+            if "story_create" in obj:
+                found.append(obj["story_create"])
+            for v in obj.values():
+                found.extend(self._find_story_create_nodes(v, depth + 1))
+        elif isinstance(obj, list):
+            for item in obj:
+                found.extend(self._find_story_create_nodes(item, depth + 1))
+        return found
+
+    def _json_has_other_group(self, obj, group_id: str, depth: int = 0) -> bool:
+        """
+        True nếu nhánh story_create gắn group KHÁC (echo bài nhóm trước).
+        """
+        if depth > 14 or obj is None:
+            return False
+        gid = str(group_id)
+        if isinstance(obj, dict):
+            for key in ("to_id", "group_id", "groupID"):
+                val = obj.get(key)
+                if val is None:
+                    continue
+                sval = str(val)
+                if sval.isdigit() and len(sval) >= 8 and sval != gid:
+                    return True
+            aud = obj.get("audience")
+            if isinstance(aud, dict):
+                tid = str(aud.get("to_id", ""))
+                if tid.isdigit() and len(tid) >= 8 and tid != gid:
+                    return True
+            for val in obj.values():
+                if self._json_has_other_group(val, gid, depth + 1):
+                    return True
+        elif isinstance(obj, list):
+            for item in obj:
+                if self._json_has_other_group(item, gid, depth + 1):
+                    return True
+        elif isinstance(obj, str):
+            m = re.search(r"/groups/(\d+)", obj.replace("\\/", "/"))
+            if m and m.group(1) != gid:
+                return True
+        return False
+
     def _analyze_post_response(
         self, text: str, group_id: str | None = None
     ) -> tuple[str, str]:
@@ -1266,11 +1374,19 @@ class FacebookBackend:
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
-            # Chỉ nhận id từ story_create — tránh echo bài cũ trên feed
+            # Chỉ nhận id từ story_create — và phải thuộc đúng group_id
             found, status = self._walk_json_for_post(data, create_only=True)
             if found:
                 if found in self._used_post_ids or (gid and found == gid):
                     continue
+                if gid:
+                    wrong = False
+                    for sc in self._find_story_create_nodes(data):
+                        if self._json_has_other_group(sc, gid):
+                            wrong = True
+                            break
+                    if wrong:
+                        continue
                 post_id = found
                 publish_status = status
                 break
@@ -1286,6 +1402,7 @@ class FacebookBackend:
                     continue
                 story_url = url_m.group(0).replace("\\/", "/")
                 post_id = post_id or url_pid
+                break
 
         if not post_id:
             # Chỉ lấy id gần ngữ cảnh tạo bài — tránh id feed cũ
@@ -1377,6 +1494,19 @@ class FacebookBackend:
             time.sleep(0.8)
 
         doc_ids = self._extract_composer_doc_ids(html)
+        # Nhóm 2+: CHỈ dùng doc_id scrap từ trang nhóm hiện tại (bỏ known cũ)
+        if self._used_post_ids:
+            scraped_only = []
+            known = {
+                "26937332182536553", "4669579913112843", "5634383916606190",
+                "4229729377134595", "238010847699429", "7828976785402038",
+                "23618316235273932",
+            }
+            for d in doc_ids:
+                if d not in known:
+                    scraped_only.append(d)
+            # Nếu scrap được thì chỉ dùng scrap; không thì vẫn thử known nhưng sau
+            doc_ids = scraped_only + [d for d in doc_ids if d in known]
         entry_points = ["inline_composer", "group", "feed"]
         anchors = self._message_anchors(message)
         last_hint = ""
@@ -1461,12 +1591,6 @@ class FacebookBackend:
                     tag = f"{msg}"
                     if ph_id:
                         tag += " (+ảnh)"
-                    try:
-                        self._tokens_cache = {**tokens, "__user": uid, "fb_dtsg": fb_dtsg}
-                        self._tokens_cache_time = time.time()
-                        self.save_tokens()
-                    except Exception:
-                        pass
                     return (verified, tag)
                 claimed_unverified += 1
                 last_hint = f"permalink không có FPV / không mở được {post_id[:18]}"
@@ -1884,10 +2008,11 @@ class FacebookBackend:
     def _post_via_mobile(
         self, group_id: str, message: str, image_path: str = None
     ) -> tuple[str, str]:
-        """Đăng qua mbasic — tìm form compose linh hoạt hơn."""
-        tokens = self._get_tokens()
-        fb_dtsg = tokens.get("fb_dtsg", "")
-        uid = tokens.get("__user") or self._get_user_id()
+        """Đăng qua mbasic — lấy token mới từ trang nhóm, xác nhận bằng FPV."""
+        # Force token mới — không dùng cache dtsg cũ
+        self._tokens_cache.clear()
+        self._tokens_cache_time = 0.0
+        uid = self._get_user_id()
 
         saved_headers = dict(self.session.headers)
         self._use_mobile_session()
@@ -1901,12 +2026,16 @@ class FacebookBackend:
             ]
 
             html = ""
+            fb_dtsg = ""
             for url in urls_to_try:
                 try:
                     resp = self.session.get(url, timeout=12, allow_redirects=True)
                     if resp.status_code != 200:
                         continue
                     html = resp.text
+                    fields0 = self._extract_form_fields(html)
+                    if fields0.get("fb_dtsg"):
+                        fb_dtsg = fields0["fb_dtsg"]
                     link_m = re.search(
                         r'href="(/composer/[^"]*target=' + re.escape(str(group_id)) + r'[^"]*)"',
                         html, re.I,
@@ -1925,6 +2054,9 @@ class FacebookBackend:
                             timeout=12, allow_redirects=True,
                         )
                         html = compose_page.text
+                        fields0 = self._extract_form_fields(html)
+                        if fields0.get("fb_dtsg"):
+                            fb_dtsg = fields0["fb_dtsg"]
                     if "textarea" in html.lower() or "xc_message" in html or "fb_dtsg" in html:
                         break
                 except Exception:
@@ -1939,6 +2071,8 @@ class FacebookBackend:
             fields = self._extract_form_fields(html)
             if fields.get("fb_dtsg"):
                 fb_dtsg = fields["fb_dtsg"]
+            if not fb_dtsg:
+                return "failed", "mbasic: thiếu fb_dtsg mới"
 
             ta_m = re.search(r'<textarea[^>]+name=["\']([^"\']+)["\']', html, re.I)
             msg_key = ta_m.group(1) if ta_m else "xc_message"
@@ -1951,15 +2085,20 @@ class FacebookBackend:
             fields["xc_message"] = message
             fields["target"] = str(group_id)
             fields["c_src"] = "group"
-            if fb_dtsg:
-                fields["fb_dtsg"] = fb_dtsg
+            fields["fb_dtsg"] = fb_dtsg
             if uid:
                 fields["__user"] = uid
             fields.setdefault("view_post", "Đăng")
 
             post_url = action if action.startswith("http") else f"{MOBILE_URL}{action}"
 
-            if image_path and Path(image_path).is_file():
+            # Nhóm 2+: ưu tiên text trên mbasic (ổn định hơn có ảnh)
+            use_image = (
+                image_path
+                and Path(image_path).is_file()
+                and not self._used_post_ids
+            )
+            if use_image:
                 with open(image_path, "rb") as fh:
                     post_resp = self.session.post(
                         post_url, data=fields,
@@ -1971,20 +2110,35 @@ class FacebookBackend:
                     post_url, data=fields, allow_redirects=True, timeout=15,
                 )
 
+            if "login" in post_resp.url.lower():
+                return "failed", "Cookies hết hạn — lấy lại cookies"
+
             status, msg = self._analyze_post_response(post_resp.text, group_id=group_id)
-            if status in ("published", "pending"):
-                return status, msg
             pid_m = re.search(
                 r"(?:story_fbid|posts/|permalink\.php\?story_fbid=)[=/]?(\d{8,})",
                 post_resp.url,
             )
-            if pid_m:
+            post_id = pid_m.group(1) if pid_m else None
+            if status in ("published", "pending") and post_id:
+                return status, msg
+            if post_id:
                 if "pending" in post_resp.url.lower():
-                    return "pending", f"Đang chờ admin duyệt ({pid_m.group(1)})"
-                return "published", f"Đã đăng lên nhóm ({pid_m.group(1)})"
-            if "login" in post_resp.url.lower():
-                return "failed", "Cookies hết hạn — lấy lại cookies"
-            return "failed", "mbasic: không xác nhận được bài đăng (không có post ID)"
+                    return "pending", f"Đang chờ admin duyệt ({post_id})"
+                return "published", f"Đã đăng lên nhóm ({post_id})"
+
+            # Không có post id trên URL → xác minh FPV trên pending/feed
+            time.sleep(1.5)
+            marker = self._extract_verify_marker(message)
+            anchors = self._message_anchors(message, marker)
+            verified = self._verify_pending_or_feed(group_id, anchors, "pending")
+            if verified:
+                return verified, f"mbasic OK (xác minh FPV trên nhóm)"
+            verified = self._verify_post_status(
+                group_id, message, post_id=None, claimed="pending", marker=marker
+            )
+            if verified:
+                return verified, f"mbasic OK (xác minh FPV)"
+            return "failed", "mbasic: đã gửi form nhưng không thấy FPV trên nhóm"
         except Exception as exc:
             return "failed", f"mbasic: {exc}"
         finally:
@@ -3160,7 +3314,8 @@ class App(tk.Tk):
         self._tick_timer()
 
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
-        self._live("Spin {A|B|C} + FPV riêng | permalink phải thấy FPV mới tính OK", "info")
+        self._live("Mỗi nhóm: nạp lại cookies + fb_dtsg mới | xóa cache token cũ", "info")
+        self._live("Spin {A|B|C} + FPV | nhóm 2+ ưu tiên mbasic", "info")
         self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
@@ -3176,6 +3331,9 @@ class App(tk.Tk):
                 gname = g.get("name", gid)
                 n = idx + 1
                 t = len(groups)
+                # Xóa token cache trước mỗi nhóm (tránh dtsg/doc_id cũ)
+                self.backend._tokens_cache.clear()
+                self.backend._tokens_cache_time = 0.0
                 msg_for_group = self._unique_message(
                     message, gid, index=n, group_name=gname
                 )
@@ -3432,6 +3590,17 @@ class App(tk.Tk):
             bg=COLOR_BUTTON, fg="white", relief="flat", cursor="hand2",
             font=("Segoe UI", 10, "bold"), padx=12, pady=6,
         ).pack(anchor="w", pady=(10, 0))
+        HoverButton(
+            data_card, text="🧹  Xóa cache đăng bài (tokens.json / fb_dtsg cũ)",
+            command=self._clear_posting_cache_ui,
+            bg="#FEE2E2", fg=COLOR_ERROR, relief="flat", cursor="hand2",
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6,
+        ).pack(anchor="w", pady=(8, 0))
+        tk.Label(
+            data_card,
+            text="Nên xóa cache nếu nhóm 2+ toàn lỗi / GraphQL trả id giả.",
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(4, 0))
 
         self._proxy_status_var = tk.StringVar(value="")
         tk.Label(proxy_card, textvariable=self._proxy_status_var,
@@ -3477,6 +3646,19 @@ class App(tk.Tk):
             )
         except Exception as exc:
             messagebox.showerror("Lỗi lưu", str(exc))
+
+    def _clear_posting_cache_ui(self):
+        try:
+            self.backend.clear_posting_cache()
+            messagebox.showinfo(
+                "Đã xóa cache",
+                "Đã xóa tokens.json và cache fb_dtsg trong RAM.\n"
+                "Cookies đăng nhập vẫn giữ.\n\n"
+                "Hãy chạy đăng bài lại.",
+            )
+            self._log("Đã xóa cache đăng bài (tokens/fb_dtsg)", "warn")
+        except Exception as exc:
+            messagebox.showerror("Lỗi", str(exc))
 
     def _check_connection(self):
         self._net_status_var.set("🔄 Đang kiểm tra…")
