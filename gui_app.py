@@ -1219,6 +1219,11 @@ class FacebookBackend:
             if tokens.get("jazoest"):
                 fields["jazoest"] = tokens["jazoest"]
             fields["__a"] = "1"
+            fields["target"] = str(group_id)
+            fields["c_src"] = "group"
+
+            if not action:
+                action = f"/composer/mbasic/?c_src=group&target={group_id}"
 
             post_url = action if action.startswith("http") else f"https://m.facebook.com{action}"
 
