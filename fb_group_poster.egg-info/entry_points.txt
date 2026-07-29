@@ -1,0 +1,2 @@
+[console_scripts]
+fb-poster = fb_poster.cli:main
