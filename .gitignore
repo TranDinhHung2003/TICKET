@@ -1,1 +1,9 @@
-__pycache__/\n*.pyc\n*.egg-info/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.spec.bak
+.fb_poster_cookies.json
+fb_cookies.json
+.env

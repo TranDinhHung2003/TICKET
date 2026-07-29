@@ -23,7 +23,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
 MOBILE_URL = "https://mbasic.facebook.com"
 
@@ -685,6 +685,7 @@ class FacebookBackend:
         # Luôn thử GraphQL trước (kể cả khi có ảnh)
         methods = [
             ("GraphQL", self._post_via_graphql),
+            ("Ajax", self._post_via_ajax_feed),
             ("composer", self._post_via_composer_direct),
             ("mbasic", self._post_via_mobile),
             ("m.facebook", self._post_via_m_composer),
@@ -715,6 +716,7 @@ class FacebookBackend:
 
         self._use_desktop_session()
         upload_urls = [
+            f"https://upload.facebook.com/ajax/react_composer/attachments/photo/upload?__a=1&fb_dtsg={fb_dtsg}",
             "https://www.facebook.com/ajax/react_composer/attachments/photo/upload",
             "https://upload.facebook.com/ajax/react_composer/attachments/photo/upload",
         ]
@@ -725,6 +727,8 @@ class FacebookBackend:
             "source": "8",
             "profile_id": uid,
             "target_id": uid,
+            "waterfallxapp": "comet",
+            "upload_id": "jsc_c_a0",
         }
         mime = "image/jpeg"
         if path.suffix.lower() == ".png":
@@ -749,12 +753,18 @@ class FacebookBackend:
                 text = resp.text
                 if text.startswith("for (;;);"):
                     text = text[9:]
+                # P.A.I.F style
+                locale = text.find('"photoID":"')
+                if locale >= 0:
+                    photo_id = text[locale + 11: locale + 27].split('"')[0]
+                    if photo_id.isdigit():
+                        return photo_id
                 m = re.search(
-                    r'"photoID"\s*:\s*"?(\d+)"?|"photo_id"\s*:\s*"?(\d+)"?|"id"\s*:\s*"(\d{10,})"',
+                    r'"photoID"\s*:\s*"(\d+)"|"photo_id"\s*:\s*"(\d+)"',
                     text,
                 )
                 if m:
-                    return next(g for g in m.groups() if g)
+                    return m.group(1) or m.group(2)
                 # Thử parse JSON
                 try:
                     j = json.loads(text)
@@ -789,6 +799,7 @@ class FacebookBackend:
     def _build_gql_variables(
         self, group_id: str, message: str, uid: str, photo_id: str | None = None
     ) -> dict:
+        """Payload GraphQL theo format đã chạy được trên nhiều tool cookies."""
         sid = str(uuid.uuid4())
         attachments = []
         if photo_id:
@@ -798,25 +809,24 @@ class FacebookBackend:
                 "composer_entry_point": "inline_composer",
                 "composer_source_surface": "group",
                 "composer_type": "group",
-                "logging": {"composer_session_id": sid},
+                "idempotence_token": f"{uuid.uuid4()}_FEED",
                 "source": "WWW",
+                "attachments": attachments,
                 "message": {"ranges": [], "text": message},
-                "with_tags_ids": None,
-                "inline_style_ranges": [],
+                "inline_activities": [],
+                "explicit_place_id": "0",
                 "text_format_preset_id": "0",
-                "group_id": str(group_id),
+                "tracking": [None],
                 "audience": {"to_id": str(group_id)},
                 "actor_id": str(uid),
-                "client_mutation_id": "1",
-                "attachments": attachments,
-                "is_tags_user_selected": False,
-                "navigation_data": {
-                    "attribution_id_v2": (
-                        f"CometGroupDiscussionRoot.react,comet.group,"
-                        f"via_cold_start,{int(time.time() * 1000)},,,,"
-                    )
-                },
+                "client_mutation_id": str(uuid.uuid4().int % 100),
+                "logging": {"composer_session_id": sid},
             },
+            "displayCommentsFeedbackContext": None,
+            "displayCommentsContextEnableComment": None,
+            "displayCommentsContextIsAdPreview": None,
+            "displayCommentsContextIsAggregatedShare": None,
+            "displayCommentsContextIsStorySet": None,
             "feedLocation": "GROUP",
             "feedbackSource": 0,
             "focusCommentID": None,
@@ -826,10 +836,332 @@ class FacebookBackend:
             "privacySelectorRenderLocation": "COMET_STREAM",
             "renderLocation": "group",
             "useDefaultActor": False,
-            "isCrossposting": False,
             "isFeed": False,
+            "isFundraiser": False,
+            "isFunFactPost": False,
             "isGroup": True,
+            "isTimeline": False,
+            "isEvent": False,
+            "isPageNewsFeed": False,
+            "UFI2CommentsProvider_commentsKey": "CometGroupDiscussionRootSuccessQuery",
         }
+
+    def _analyze_post_response(self, text: str) -> tuple[str, str]:
+        """
+        Phân tích phản hồi đăng bài.
+        Returns: (status, message) — status = published|pending|failed|unknown
+        """
+        raw = text
+        if text.startswith("for (;;);"):
+            text = text[9:]
+
+        low = text.lower()
+
+        # Lỗi CRITICAL (bỏ qua WARNING relay)
+        for chunk in text.split("\n"):
+            chunk = chunk.strip()
+            if not chunk or chunk[0] not in "{[":
+                continue
+            try:
+                data = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and data.get("errors"):
+                for err in data["errors"]:
+                    if not isinstance(err, dict):
+                        continue
+                    sev = str(err.get("severity", "")).upper()
+                    msg = str(err.get("message", ""))
+                    if sev and sev not in ("CRITICAL", "ERROR", ""):
+                        continue
+                    if "pending" in msg.lower():
+                        return "pending", "Đang chờ admin duyệt"
+                    if msg and "warning" not in msg.lower():
+                        return "failed", f"Lỗi FB: {msg[:140]}"
+
+        pending_hints = (
+            "pending_approval", "pending post", "awaiting approval",
+            "chờ duyệt", "chờ phê duyệt", "requires_review",
+            "publish_status\":\"pending", "publish_status_pending",
+            "post_is_pending", "under_review",
+        )
+        is_pending = any(k.lower() in low for k in pending_hints)
+
+        post_id = None
+        publish_status = ""
+        story_url = ""
+
+        for chunk in text.split("\n"):
+            chunk = chunk.strip()
+            if not chunk or chunk[0] not in "{[":
+                continue
+            try:
+                data = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            found, status = self._walk_json_for_post(data)
+            if found:
+                post_id = found
+                publish_status = status
+                break
+            # Tìm URL bài
+            url_m = re.search(
+                r'https:\\?/\\?/www\.facebook\.com\\?/groups\\?/[^"\\]+\\?/(?:posts|permalink)\\?/[^"\\]+',
+                chunk,
+            )
+            if url_m:
+                story_url = url_m.group(0).replace("\\/", "/")
+
+        if not post_id:
+            for pat in (
+                r'"legacy_story_hideable_id"\s*:\s*"(\d+)"',
+                r'"post_id"\s*:\s*"(\d+)"',
+                r'"story_id"\s*:\s*"([^"]+)"',
+                r'"creation_story"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
+                r'"story_create"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
+            ):
+                m = re.search(pat, text)
+                if m:
+                    post_id = m.group(1)
+                    break
+
+        if post_id or story_url:
+            label = post_id[:28] if post_id else story_url[-40:]
+            if is_pending or "pending" in publish_status.lower():
+                return "pending", f"Đang chờ admin duyệt ({label})"
+            return "published", f"Đã đăng lên nhóm ({label})"
+
+        # Có data.story_create mà không lỗi → thường là OK
+        if re.search(r'"story_create"\s*:\s*\{', text) and '"errors"' not in text[:500]:
+            if is_pending:
+                return "pending", "Đang chờ admin duyệt"
+            return "published", "Đã gửi bài (GraphQL story_create)"
+
+        # Debug ngắn khi fail
+        snippet = re.sub(r"\s+", " ", raw[:180])
+        return "unknown", snippet
+
+    def _extract_composer_doc_ids(self, html: str) -> list[str]:
+        """Lấy doc_id composer từ HTML + danh sách ID đã biết."""
+        ids: list[str] = []
+        patterns = [
+            r'ComposerStoryCreateMutation[^}]{0,400}"doc_id"\s*:\s*"(\d+)"',
+            r'"doc_id"\s*:\s*"(\d+)"[^}]{0,400}ComposerStoryCreateMutation',
+            r'CometComposerCreateMutation[^}]{0,400}"doc_id"\s*:\s*"(\d+)"',
+            r'GroupComposer[^}]{0,400}"doc_id"\s*:\s*"(\d+)"',
+            r'useCometComposerCreateMutation[^}]*"doc_id"\s*:\s*"(\d+)"',
+            r'"name":"ComposerStoryCreateMutation"[^,]*,"id":"(\d+)"',
+            r'"id":"(\d+)","name":"ComposerStoryCreateMutation"',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, html):
+                if m.group(1) not in ids:
+                    ids.append(m.group(1))
+        # Doc IDs từng chạy được (có thể hết hạn — vẫn thử)
+        known = [
+            "26937332182536553",
+            "4669579913112843",
+            "5634383916606190",
+            "4229729377134595",
+            "238010847699429",
+            "7828976785402038",
+            "23618316235273932",
+        ]
+        for fid in known:
+            if fid not in ids:
+                ids.append(fid)
+        return ids
+
+    def _post_via_graphql(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[str, str]:
+        """Đăng bài qua GraphQL — format payload giống tool cookies thực tế."""
+        # Luôn refresh token từ trang nhóm
+        self._use_desktop_session()
+        group_url = f"https://www.facebook.com/groups/{group_id}"
+        try:
+            resp = self.session.get(group_url, timeout=15)
+            html = resp.text
+        except Exception as exc:
+            return "failed", f"Không mở được trang nhóm: {exc}"
+
+        tokens = self._extract_fb_tokens(html)
+        uid = self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg")
+        if not fb_dtsg:
+            tokens = self._get_tokens(force_refresh=True)
+            fb_dtsg = tokens.get("fb_dtsg")
+        if not fb_dtsg or not uid:
+            return "failed", "Không lấy được fb_dtsg — lấy lại cookies từ Chrome"
+
+        if re.search(r'only.?admins.?can.?post|chỉ admin.*đăng|you can.?t post', html, re.I):
+            return "failed", "Nhóm chỉ cho admin đăng bài"
+
+        photo_id = None
+        if image_path and Path(image_path).is_file():
+            # Gắn token mới vào upload
+            up_tokens = {"__user": uid, "fb_dtsg": fb_dtsg, **tokens}
+            photo_id = self._upload_photo(image_path, up_tokens)
+
+        doc_ids = self._extract_composer_doc_ids(html)
+        variables = self._build_gql_variables(group_id, message, uid, photo_id)
+        last_hint = ""
+
+        for doc_id in doc_ids[:8]:
+            payload: dict = {
+                "av": uid,
+                "__user": uid,
+                "__a": "1",
+                "__req": "1",
+                "__comet_req": "15",
+                "fb_dtsg": fb_dtsg,
+                "fb_api_caller_class": "RelayModern",
+                "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
+                "server_timestamps": "true",
+                "variables": json.dumps(variables, ensure_ascii=False),
+                "doc_id": doc_id,
+            }
+            if tokens.get("lsd"):
+                payload["lsd"] = tokens["lsd"]
+            if tokens.get("jazoest"):
+                payload["jazoest"] = tokens["jazoest"]
+
+            headers = {
+                **self.DESKTOP_HEADERS,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
+                "X-FB-LSD": tokens.get("lsd", ""),
+                "Origin": "https://www.facebook.com",
+                "Referer": group_url + "/",
+            }
+            try:
+                gql_resp = self.session.post(
+                    "https://www.facebook.com/api/graphql/",
+                    data=payload,
+                    headers=headers,
+                    timeout=20,
+                )
+                status, msg = self._analyze_post_response(gql_resp.text)
+                if status in ("published", "pending"):
+                    if photo_id:
+                        msg = f"{msg} (+ảnh)"
+                    return status, msg
+                if status == "failed":
+                    if any(k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin", "chỉ cho")):
+                        return "failed", msg
+                    last_hint = msg
+                elif status == "unknown" and msg:
+                    last_hint = msg[:100]
+            except Exception as exc:
+                last_hint = str(exc)
+                continue
+
+        # Text-only retry nếu upload ảnh fail
+        if photo_id:
+            variables = self._build_gql_variables(group_id, message, uid, None)
+            for doc_id in doc_ids[:4]:
+                payload = {
+                    "av": uid, "__user": uid, "__a": "1", "__comet_req": "15",
+                    "fb_dtsg": fb_dtsg,
+                    "fb_api_caller_class": "RelayModern",
+                    "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
+                    "variables": json.dumps(variables, ensure_ascii=False),
+                    "doc_id": doc_id,
+                }
+                if tokens.get("lsd"):
+                    payload["lsd"] = tokens["lsd"]
+                try:
+                    gql_resp = self.session.post(
+                        "https://www.facebook.com/api/graphql/",
+                        data=payload,
+                        headers={
+                            **self.DESKTOP_HEADERS,
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
+                            "Origin": "https://www.facebook.com",
+                            "Referer": group_url + "/",
+                        },
+                        timeout=20,
+                    )
+                    status, msg = self._analyze_post_response(gql_resp.text)
+                    if status in ("published", "pending"):
+                        return status, f"{msg} (chỉ text)"
+                except Exception:
+                    continue
+
+        hint = f" — {last_hint}" if last_hint else ""
+        return "failed", f"GraphQL không nhận post ID{hint}"
+
+    def _post_via_ajax_feed(
+        self, group_id: str, message: str, image_path: str = None
+    ) -> tuple[str, str]:
+        """Fallback: ajax updatestatus / groups composer."""
+        self._use_desktop_session()
+        tokens = self._get_tokens(force_refresh=True)
+        uid = tokens.get("__user") or self._get_user_id()
+        fb_dtsg = tokens.get("fb_dtsg")
+        if not fb_dtsg or not uid:
+            return "failed", "Thiếu fb_dtsg"
+
+        endpoints = [
+            "https://www.facebook.com/ajax/updatestatus.php",
+            "https://www.facebook.com/ajax/groups/composer/",
+            f"https://www.facebook.com/groups/{group_id}/",
+        ]
+        bases = [
+            {
+                "fb_dtsg": fb_dtsg,
+                "__user": uid,
+                "__a": "1",
+                "xhpc_message": message,
+                "xhpc_message_text": message,
+                "xhpc_targetid": str(group_id),
+                "xhpc_context": "group",
+                "xhpc_timeline": "1",
+                "is_group": "1",
+                "group_id": str(group_id),
+                "message": message,
+                "target": str(group_id),
+            },
+        ]
+
+        for url in endpoints:
+            for data in bases:
+                try:
+                    if image_path and Path(image_path).is_file() and "composer" in url:
+                        with open(image_path, "rb") as fh:
+                            resp = self.session.post(
+                                url, data=data,
+                                files={"file": (Path(image_path).name, fh, "image/jpeg")},
+                                headers={
+                                    **self.DESKTOP_HEADERS,
+                                    "Origin": "https://www.facebook.com",
+                                    "Referer": f"https://www.facebook.com/groups/{group_id}/",
+                                    "X-Requested-With": "XMLHttpRequest",
+                                },
+                                timeout=20,
+                            )
+                    else:
+                        resp = self.session.post(
+                            url, data=data,
+                            headers={
+                                **self.DESKTOP_HEADERS,
+                                "Origin": "https://www.facebook.com",
+                                "Referer": f"https://www.facebook.com/groups/{group_id}/",
+                                "X-Requested-With": "XMLHttpRequest",
+                                "Content-Type": "application/x-www-form-urlencoded",
+                            },
+                            timeout=15,
+                        )
+                    status, msg = self._analyze_post_response(resp.text)
+                    if status in ("published", "pending"):
+                        return status, msg
+                    if self._post_ok(resp.text) or '"payload"' in resp.text:
+                        if "error" not in resp.text[:300].lower():
+                            return "published", "Đã gửi (ajax)"
+                except Exception:
+                    continue
+        return "failed", "Ajax composer thất bại"
 
     def _verify_post_status(self, group_id: str, message: str) -> str | None:
         """
@@ -869,82 +1201,6 @@ class FacebookBackend:
             pass
         return None
 
-    def _analyze_post_response(self, text: str) -> tuple[str, str]:
-        """
-        Phân tích phản hồi đăng bài.
-        Returns: (status, message) — status = published|pending|failed|unknown
-        """
-        if text.startswith("for (;;);"):
-            text = text[9:]
-
-        low = text.lower()
-
-        # Lỗi rõ ràng
-        error_patterns = [
-            (r'"message"\s*:\s*"([^"]{10,160})"', True),
-            (r'you can.?t post|không thể đăng|not allowed to post', False),
-            (r'permission.?denied|không có quyền', False),
-            (r'rate.?limit|quá nhiều|try again later', False),
-        ]
-        for pat, capture in error_patterns:
-            m = re.search(pat, text, re.I)
-            if m:
-                err = m.group(1) if capture and m.lastindex else m.group(0)
-                return "failed", f"Lỗi: {err[:120]}"
-
-        pending_hints = (
-            "pending_approval", "pending post", "awaiting approval",
-            "chờ duyệt", "chờ phê duyệt", "requires_review",
-            '"publish_status":"PENDING"', "PUBLISH_STATUS_PENDING",
-            "post_is_pending", "under_review",
-        )
-        is_pending = any(k.lower() in low for k in pending_hints)
-
-        # Cần có post_id / story_id thật — không báo thành công nếu chỉ thấy từ khóa mơ hồ
-        post_id = None
-        publish_status = ""
-
-        for chunk in text.split("\n"):
-            chunk = chunk.strip()
-            if not chunk or chunk[0] not in "{[":
-                continue
-            try:
-                data = json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict) and data.get("errors"):
-                err = data["errors"][0]
-                msg = err.get("message", "GraphQL error") if isinstance(err, dict) else str(err)
-                # Một số lỗi "pending" vẫn là gửi được
-                if "pending" in str(msg).lower():
-                    return "pending", "Đang chờ admin duyệt"
-                return "failed", f"Lỗi: {msg[:120]}"
-            found, status = self._walk_json_for_post(data)
-            if found:
-                post_id = found
-                publish_status = status
-                break
-
-        # Regex lấy id nếu walk JSON thất bại
-        if not post_id:
-            for pat in (
-                r'"legacy_story_hideable_id"\s*:\s*"(\d+)"',
-                r'"post_id"\s*:\s*"(\d+)"',
-                r'"story_id"\s*:\s*"([^"]+)"',
-                r'"creation_story"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"',
-            ):
-                m = re.search(pat, text)
-                if m:
-                    post_id = m.group(1)
-                    break
-
-        if post_id:
-            if is_pending or "pending" in publish_status.lower():
-                return "pending", f"Đang chờ admin duyệt (post: {post_id[:24]})"
-            return "published", f"Đã đăng lên nhóm (post: {post_id[:24]})"
-
-        # Không có post_id → KHÔNG báo thành công (tránh báo sai)
-        return "unknown", ""
 
     def _walk_json_for_post(self, obj, depth=0) -> tuple[str | None, str]:
         """Duyệt JSON tìm story/post id. Trả (post_id, status)."""
@@ -979,123 +1235,7 @@ class FacebookBackend:
                     return found, status
         return None, ""
 
-    def _extract_composer_doc_ids(self, html: str) -> list[str]:
-        """Lấy doc_id liên quan composer từ HTML."""
-        ids: list[str] = []
-        patterns = [
-            r'ComposerStoryCreateMutation[^}]{0,300}"doc_id"\s*:\s*"(\d+)"',
-            r'"doc_id"\s*:\s*"(\d+)"[^}]{0,300}ComposerStoryCreateMutation',
-            r'CometComposerCreateMutation[^}]{0,300}"doc_id"\s*:\s*"(\d+)"',
-            r'GroupComposer[^}]{0,300}"doc_id"\s*:\s*"(\d+)"',
-            r'useCometComposerCreateMutation[^}]*"doc_id"\s*:\s*"(\d+)"',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, html):
-                if m.group(1) not in ids:
-                    ids.append(m.group(1))
-        # Fallback phổ biến
-        for fid in ("238010847699429", "7828976785402038", "23618316235273932"):
-            if fid not in ids:
-                ids.append(fid)
-        return ids
 
-    def _post_via_graphql(
-        self, group_id: str, message: str, image_path: str = None
-    ) -> tuple[str, str]:
-        """Đăng bài qua GraphQL API (desktop cookies) — hỗ trợ cả ảnh."""
-        tokens = self._get_tokens()
-        uid = tokens.get("__user") or self._get_user_id()
-        fb_dtsg = tokens.get("fb_dtsg")
-        if not fb_dtsg or not uid:
-            return "failed", "Không lấy được token (fb_dtsg) — lấy lại cookies"
-
-        self._use_desktop_session()
-        group_url = f"https://www.facebook.com/groups/{group_id}"
-        try:
-            resp = self.session.get(group_url, timeout=12)
-            html = resp.text
-        except Exception as exc:
-            return "failed", f"Không mở được trang nhóm: {exc}"
-
-        if re.search(r'only.?admins.?can.?post|chỉ admin.*đăng|you can.?t post', html, re.I):
-            return "failed", "Nhóm chỉ cho admin đăng bài"
-
-        photo_id = None
-        if image_path and Path(image_path).is_file():
-            photo_id = self._upload_photo(image_path, tokens)
-
-        doc_ids = self._extract_composer_doc_ids(html)
-        variables = self._build_gql_variables(group_id, message, uid, photo_id)
-
-        for doc_id in doc_ids[:5]:
-            payload: dict = {
-                "av": uid,
-                "__user": uid,
-                "__a": "1",
-                "__comet_req": "15",
-                "fb_dtsg": fb_dtsg,
-                "fb_api_caller_class": "RelayModern",
-                "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
-                "variables": json.dumps(variables, ensure_ascii=False),
-                "doc_id": doc_id,
-            }
-            if tokens.get("lsd"):
-                payload["lsd"] = tokens["lsd"]
-            if tokens.get("jazoest"):
-                payload["jazoest"] = tokens["jazoest"]
-
-            headers = {
-                **self.DESKTOP_HEADERS,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "X-FB-Friendly-Name": "ComposerStoryCreateMutation",
-                "Origin": "https://www.facebook.com",
-                "Referer": group_url,
-            }
-            try:
-                gql_resp = self.session.post(
-                    "https://www.facebook.com/api/graphql/",
-                    data=payload,
-                    headers=headers,
-                    timeout=15,
-                )
-                status, msg = self._analyze_post_response(gql_resp.text)
-                if status in ("published", "pending"):
-                    if photo_id and "ảnh" not in msg.lower():
-                        msg = f"{msg} (+ảnh)"
-                    return status, msg
-                if status == "failed" and any(
-                    k in msg.lower() for k in ("permission", "quyền", "not allowed", "admin", "chỉ cho")
-                ):
-                    return "failed", msg
-            except Exception:
-                continue
-
-        # Nếu có ảnh nhưng GraphQL fail — thử đăng text không ảnh
-        if photo_id:
-            variables = self._build_gql_variables(group_id, message, uid, None)
-            for doc_id in doc_ids[:3]:
-                payload = {
-                    "av": uid, "__user": uid, "__a": "1", "__comet_req": "15",
-                    "fb_dtsg": fb_dtsg,
-                    "fb_api_caller_class": "RelayModern",
-                    "fb_api_req_friendly_name": "ComposerStoryCreateMutation",
-                    "variables": json.dumps(variables, ensure_ascii=False),
-                    "doc_id": doc_id,
-                }
-                if tokens.get("lsd"):
-                    payload["lsd"] = tokens["lsd"]
-                try:
-                    gql_resp = self.session.post(
-                        "https://www.facebook.com/api/graphql/",
-                        data=payload, headers=headers, timeout=15,
-                    )
-                    status, msg = self._analyze_post_response(gql_resp.text)
-                    if status in ("published", "pending"):
-                        return status, f"{msg} (text, ảnh upload lỗi)"
-                except Exception:
-                    continue
-
-        return "failed", "GraphQL: không nhận được post ID"
 
     def _post_via_composer_direct(
         self, group_id: str, message: str, image_path: str = None
