@@ -1,0 +1,939 @@
+"""
+Facebook Group Poster — Ứng dụng GUI Desktop
+Đăng bài quảng cáo lên nhiều nhóm Facebook tự động.
+"""
+
+import json
+import os
+import re
+import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+import requests
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────────────────────────────────────
+
+APP_TITLE = "Facebook Group Poster"
+APP_VERSION = "1.0.0"
+COOKIES_FILE = Path.home() / ".fb_poster_cookies.json"
+MOBILE_URL = "https://mbasic.facebook.com"
+
+COLOR_BG = "#1a1a2e"
+COLOR_PANEL = "#16213e"
+COLOR_CARD = "#0f3460"
+COLOR_ACCENT = "#e94560"
+COLOR_ACCENT2 = "#533483"
+COLOR_TEXT = "#eaeaea"
+COLOR_TEXT_DIM = "#a0a0b0"
+COLOR_SUCCESS = "#4ade80"
+COLOR_ERROR = "#f87171"
+COLOR_WARNING = "#fbbf24"
+COLOR_BUTTON = "#e94560"
+COLOR_BUTTON_HOVER = "#c73652"
+COLOR_INPUT_BG = "#0a1628"
+COLOR_INPUT_FG = "#eaeaea"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Facebook Session Backend
+# ──────────────────────────────────────────────────────────────────────────────
+
+class FacebookBackend:
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Mobile Safari/537.36"
+        ),
+        "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+    }
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(self.HEADERS)
+        self.logged_in = False
+
+    def load_cookies(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for name, value in data.items():
+            self.session.cookies.set(name, value, domain=".facebook.com")
+        self.logged_in = "c_user" in data
+        return self.logged_in
+
+    def save_cookies(self, path: Path):
+        cookies = {c.name: c.value for c in self.session.cookies}
+        path.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+
+    def set_cookies_from_string(self, cookie_str: str) -> bool:
+        cookies = {}
+        for part in cookie_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, _, value = part.partition("=")
+                cookies[name.strip()] = value.strip()
+        for name, value in cookies.items():
+            self.session.cookies.set(name, value, domain=".facebook.com")
+        self.logged_in = "c_user" in cookies
+        return self.logged_in
+
+    def login(self, email: str, password: str) -> tuple[bool, str]:
+        try:
+            resp = self.session.get(f"{MOBILE_URL}/login/", timeout=30)
+            form_data = self._extract_form_fields(resp.text)
+            if not form_data:
+                return False, "Không đọc được form đăng nhập."
+            form_data.update({"email": email, "pass": password})
+            login_resp = self.session.post(
+                f"{MOBILE_URL}/login/device-based/regular/login/",
+                data=form_data,
+                allow_redirects=True,
+                timeout=30,
+            )
+            if "checkpoint" in login_resp.url or "checkpoint" in login_resp.text:
+                return False, (
+                    "Facebook yêu cầu xác minh bảo mật!\n"
+                    "Hãy đăng nhập thủ công trên trình duyệt,\n"
+                    "sau đó dùng tab 'Cookies' để nhập cookies."
+                )
+            if self._check_logged_in(login_resp.text):
+                self.logged_in = True
+                return True, "Đăng nhập thành công!"
+            return False, "Email hoặc mật khẩu không đúng."
+        except Exception as exc:
+            return False, f"Lỗi kết nối: {exc}"
+
+    def _extract_form_fields(self, html: str) -> dict:
+        fields = {}
+        for m in re.finditer(
+            r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']', html
+        ):
+            fields[m.group(1)] = m.group(2)
+        for m in re.finditer(
+            r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']([^"\']+)["\']', html
+        ):
+            fields[m.group(2)] = m.group(1)
+        return fields
+
+    def _check_logged_in(self, html: str) -> bool:
+        return any(x in html for x in ["logout", "c_user", "mbasic_logout"])
+
+    def get_profile_name(self) -> str:
+        try:
+            resp = self.session.get(f"{MOBILE_URL}/", timeout=15)
+            m = re.search(r'<title>([^<]+)</title>', resp.text)
+            if m:
+                return m.group(1).strip()
+        except Exception:
+            pass
+        return "Người dùng Facebook"
+
+    def scan_groups(self, progress_cb=None) -> list[dict]:
+        groups = []
+        seen = set()
+
+        urls_to_try = [
+            f"{MOBILE_URL}/groups/?seemore=1",
+            f"{MOBILE_URL}/groups/",
+        ]
+
+        for url in urls_to_try:
+            try:
+                if progress_cb:
+                    progress_cb(f"Đang quét: {url}")
+                resp = self.session.get(url, timeout=30)
+                self._extract_groups_from_html(resp.text, groups, seen)
+
+                # Theo dõi phân trang
+                next_links = re.findall(r'href="(/groups/\?[^"]*)"', resp.text)
+                for link in next_links[:3]:
+                    try:
+                        r2 = self.session.get(f"{MOBILE_URL}{link}", timeout=20)
+                        self._extract_groups_from_html(r2.text, groups, seen)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                if progress_cb:
+                    progress_cb(f"Lỗi quét {url}: {exc}")
+
+        return groups
+
+    def _extract_groups_from_html(self, html: str, groups: list, seen: set):
+        patterns = [
+            r'href="/groups/(\d+)[^"]*"[^>]*>\s*([^<]{3,60})\s*<',
+            r'/groups/(\d+)/?["\'].*?>\s*([^<]{3,60})<',
+        ]
+        for pattern in patterns:
+            for gid, name in re.findall(pattern, html):
+                name = re.sub(r'\s+', ' ', name).strip()
+                if gid not in seen and len(name) > 2 and not name.startswith("http"):
+                    seen.add(gid)
+                    groups.append({"id": gid, "name": name})
+
+    def post_to_group(self, group_id: str, message: str, image_path: str = None) -> tuple[bool, str]:
+        try:
+            group_url = f"{MOBILE_URL}/groups/{group_id}/"
+            resp = self.session.get(group_url, timeout=30)
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code}"
+
+            action = self._find_form_action(resp.text, group_id)
+            fields = self._extract_hidden_fields(resp.text)
+
+            if not action:
+                return False, "Không tìm thấy form đăng bài (không phải thành viên?)"
+
+            fields["xc_message"] = message
+            fields["view_post"] = "Đăng"
+
+            post_url = f"{MOBILE_URL}{action}" if action.startswith("/") else action
+
+            if image_path and Path(image_path).is_file():
+                with open(image_path, "rb") as fh:
+                    post_resp = self.session.post(
+                        post_url, data=fields,
+                        files={"file1": (Path(image_path).name, fh, "image/jpeg")},
+                        allow_redirects=True, timeout=60,
+                    )
+            else:
+                post_resp = self.session.post(
+                    post_url, data=fields,
+                    allow_redirects=True, timeout=30,
+                )
+
+            if self._post_ok(post_resp.text):
+                return True, "Thành công"
+            return False, "Không xác nhận được bài đăng"
+
+        except Exception as exc:
+            return False, str(exc)
+
+    def _find_form_action(self, html: str, group_id: str) -> str:
+        patterns = [
+            r'<form[^>]+action="(/groups/[^"]*compose[^"]*)"',
+            r'<form[^>]+action="(/a/group/post/[^"]*)"',
+            r'action="(/groups/' + group_id + r'/[^"]*)"',
+        ]
+        for p in patterns:
+            m = re.search(p, html)
+            if m:
+                return m.group(1)
+        m = re.search(r'<form[^>]+method=["\']post["\'][^>]+action="([^"]+)"', html, re.I)
+        return m.group(1) if m else ""
+
+    def _extract_hidden_fields(self, html: str) -> dict:
+        fields = {}
+        for m in re.finditer(
+            r'<input[^>]+type=["\']hidden["\'][^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']',
+            html, re.I
+        ):
+            fields[m.group(1)] = m.group(2)
+        for m in re.finditer(
+            r'<input[^>]+name=["\']([^"\']+)["\'][^>]+type=["\']hidden["\'][^>]+value=["\']([^"\']*)["\']',
+            html, re.I
+        ):
+            fields[m.group(1)] = m.group(2)
+        return fields
+
+    def _post_ok(self, html: str) -> bool:
+        return any(x in html for x in ["story_menu", "Bài viết của bạn", "Your post", "post_action"])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Custom Widgets
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HoverButton(tk.Button):
+    def __init__(self, master, **kw):
+        self._bg = kw.get("bg", COLOR_BUTTON)
+        self._hover_bg = kw.pop("hover_bg", COLOR_BUTTON_HOVER)
+        super().__init__(master, **kw)
+        self.bind("<Enter>", lambda e: self.config(bg=self._hover_bg))
+        self.bind("<Leave>", lambda e: self.config(bg=self._bg))
+
+
+class LogBox(scrolledtext.ScrolledText):
+    def __init__(self, master, **kw):
+        defaults = dict(
+            bg=COLOR_INPUT_BG, fg=COLOR_TEXT, font=("Consolas", 9),
+            wrap=tk.WORD, state="disabled", relief="flat",
+            insertbackground=COLOR_TEXT,
+        )
+        defaults.update(kw)
+        super().__init__(master, **defaults)
+        self.tag_config("ok", foreground=COLOR_SUCCESS)
+        self.tag_config("err", foreground=COLOR_ERROR)
+        self.tag_config("warn", foreground=COLOR_WARNING)
+        self.tag_config("info", foreground=COLOR_TEXT_DIM)
+        self.tag_config("bold", foreground=COLOR_TEXT, font=("Consolas", 9, "bold"))
+
+    def log(self, msg: str, tag: str = ""):
+        self.config(state="normal")
+        ts = time.strftime("%H:%M:%S")
+        self.insert("end", f"[{ts}] {msg}\n", tag)
+        self.see("end")
+        self.config(state="disabled")
+
+    def clear(self):
+        self.config(state="normal")
+        self.delete("1.0", "end")
+        self.config(state="disabled")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main Application
+# ──────────────────────────────────────────────────────────────────────────────
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(f"{APP_TITLE} v{APP_VERSION}")
+        self.geometry("1050x720")
+        self.minsize(900, 620)
+        self.configure(bg=COLOR_BG)
+        self.resizable(True, True)
+
+        # Try to set icon (works when bundled with PyInstaller)
+        try:
+            if getattr(sys, "frozen", False):
+                base = sys._MEIPASS
+            else:
+                base = os.path.dirname(__file__)
+            icon_path = os.path.join(base, "icon.ico")
+            if os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
+        except Exception:
+            pass
+
+        self.backend = FacebookBackend()
+        self.groups: list[dict] = []
+        self.selected_groups: list[dict] = []
+        self._posting = False
+        self._stop_flag = False
+
+        # Load saved cookies on startup
+        self._auto_login()
+        self._build_ui()
+
+    def _auto_login(self):
+        if COOKIES_FILE.exists():
+            self.backend.load_cookies(COOKIES_FILE)
+
+    # ── UI BUILD ──────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        # Header
+        header = tk.Frame(self, bg=COLOR_CARD, height=56)
+        header.pack(fill="x", side="top")
+        header.pack_propagate(False)
+
+        tk.Label(
+            header,
+            text=f"  📣  {APP_TITLE}",
+            bg=COLOR_CARD, fg=COLOR_TEXT,
+            font=("Segoe UI", 15, "bold"),
+        ).pack(side="left", padx=16, pady=10)
+
+        self._status_var = tk.StringVar(value="⚪ Chưa đăng nhập")
+        tk.Label(
+            header,
+            textvariable=self._status_var,
+            bg=COLOR_CARD, fg=COLOR_TEXT_DIM,
+            font=("Segoe UI", 10),
+        ).pack(side="right", padx=20)
+
+        # Notebook tabs
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(
+            "Custom.TNotebook",
+            background=COLOR_BG, borderwidth=0,
+        )
+        style.configure(
+            "Custom.TNotebook.Tab",
+            background=COLOR_PANEL, foreground=COLOR_TEXT_DIM,
+            padding=[16, 8], font=("Segoe UI", 10),
+        )
+        style.map(
+            "Custom.TNotebook.Tab",
+            background=[("selected", COLOR_CARD)],
+            foreground=[("selected", COLOR_TEXT)],
+        )
+
+        nb = ttk.Notebook(self, style="Custom.TNotebook")
+        nb.pack(fill="both", expand=True, padx=0, pady=0)
+
+        self._tab_login = tk.Frame(nb, bg=COLOR_BG)
+        self._tab_groups = tk.Frame(nb, bg=COLOR_BG)
+        self._tab_post = tk.Frame(nb, bg=COLOR_BG)
+        self._tab_log = tk.Frame(nb, bg=COLOR_BG)
+
+        nb.add(self._tab_login, text="  🔑  Đăng nhập  ")
+        nb.add(self._tab_groups, text="  👥  Nhóm của tôi  ")
+        nb.add(self._tab_post, text="  📝  Đăng bài  ")
+        nb.add(self._tab_log, text="  📋  Nhật ký  ")
+
+        self._nb = nb
+        self._build_login_tab()
+        self._build_groups_tab()
+        self._build_post_tab()
+        self._build_log_tab()
+
+        if self.backend.logged_in:
+            self._on_login_success_ui()
+
+    # ── LOGIN TAB ─────────────────────────────────────────────────────────────
+
+    def _build_login_tab(self):
+        tab = self._tab_login
+        outer = tk.Frame(tab, bg=COLOR_BG)
+        outer.pack(expand=True)
+
+        card = tk.Frame(outer, bg=COLOR_PANEL, padx=40, pady=36)
+        card.pack(pady=40, padx=20)
+
+        tk.Label(card, text="Đăng nhập Facebook", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 20))
+
+        # ── Notebook bên trong: Email/Password vs Cookie ──
+        inner_nb = ttk.Notebook(card, style="Custom.TNotebook")
+        inner_nb.grid(row=1, column=0, columnspan=2)
+
+        pane_pw = tk.Frame(inner_nb, bg=COLOR_PANEL, padx=20, pady=16)
+        pane_ck = tk.Frame(inner_nb, bg=COLOR_PANEL, padx=20, pady=16)
+        inner_nb.add(pane_pw, text="  Email / Mật khẩu  ")
+        inner_nb.add(pane_ck, text="  Nhập Cookies  ")
+
+        # Password pane
+        self._email_var = tk.StringVar()
+        self._pass_var = tk.StringVar()
+
+        def lbl(p, text, r):
+            tk.Label(p, text=text, bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                     font=("Segoe UI", 10)).grid(row=r, column=0, sticky="w", pady=4)
+
+        lbl(pane_pw, "Email:", 0)
+        email_entry = tk.Entry(pane_pw, textvariable=self._email_var, width=36,
+                               bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+                               relief="flat", font=("Segoe UI", 11))
+        email_entry.grid(row=0, column=1, padx=(8, 0), pady=4, ipady=6)
+
+        lbl(pane_pw, "Mật khẩu:", 1)
+        pass_entry = tk.Entry(pane_pw, textvariable=self._pass_var, show="●", width=36,
+                              bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+                              relief="flat", font=("Segoe UI", 11))
+        pass_entry.grid(row=1, column=1, padx=(8, 0), pady=4, ipady=6)
+
+        self._login_btn = HoverButton(
+            pane_pw, text="  Đăng nhập  ", command=self._do_login,
+            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 11, "bold"),
+            relief="flat", cursor="hand2", padx=20, pady=8,
+        )
+        self._login_btn.grid(row=2, column=0, columnspan=2, pady=(16, 0))
+
+        # Cookies pane
+        tk.Label(pane_ck, text="Dán cookies từ trình duyệt vào đây:", bg=COLOR_PANEL,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(
+            pane_ck,
+            text="(Cài extension Cookie-Editor → Export → Header String)",
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(0, 6))
+
+        self._cookie_text = scrolledtext.ScrolledText(
+            pane_ck, width=52, height=5,
+            bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+            relief="flat", font=("Consolas", 9),
+        )
+        self._cookie_text.pack(fill="x")
+
+        HoverButton(
+            pane_ck, text="  Xác nhận Cookies  ", command=self._do_set_cookies,
+            bg=COLOR_ACCENT2, fg="white", font=("Segoe UI", 11, "bold"),
+            relief="flat", cursor="hand2", padx=20, pady=8,
+        ).pack(pady=(12, 0))
+
+        # Status
+        self._login_status = tk.Label(card, text="", bg=COLOR_PANEL,
+                                      fg=COLOR_TEXT_DIM, font=("Segoe UI", 10), wraplength=440)
+        self._login_status.grid(row=2, column=0, columnspan=2, pady=(16, 0))
+
+    def _do_login(self):
+        email = self._email_var.get().strip()
+        pw = self._pass_var.get().strip()
+        if not email or not pw:
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập email và mật khẩu.")
+            return
+        self._login_btn.config(state="disabled", text="Đang đăng nhập…")
+        self._login_status.config(text="Đang kết nối tới Facebook…", fg=COLOR_WARNING)
+
+        def _worker():
+            ok, msg = self.backend.login(email, pw)
+            self.after(0, lambda: self._on_login_done(ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_login_done(self, ok: bool, msg: str):
+        self._login_btn.config(state="normal", text="  Đăng nhập  ")
+        if ok:
+            self.backend.save_cookies(COOKIES_FILE)
+            self._login_status.config(text=f"✅ {msg}", fg=COLOR_SUCCESS)
+            self._on_login_success_ui()
+        else:
+            self._login_status.config(text=f"❌ {msg}", fg=COLOR_ERROR)
+
+    def _do_set_cookies(self):
+        cookie_str = self._cookie_text.get("1.0", "end").strip()
+        if not cookie_str:
+            messagebox.showwarning("Thiếu cookies", "Vui lòng dán cookies vào ô trên.")
+            return
+        ok = self.backend.set_cookies_from_string(cookie_str)
+        if ok:
+            self.backend.save_cookies(COOKIES_FILE)
+            self._login_status.config(text="✅ Cookies hợp lệ! Đã lưu.", fg=COLOR_SUCCESS)
+            self._on_login_success_ui()
+        else:
+            self._login_status.config(
+                text="⚠️ Không tìm thấy c_user trong cookies. Thử lại.", fg=COLOR_WARNING
+            )
+
+    def _on_login_success_ui(self):
+        name = self.backend.get_profile_name() if self.backend.logged_in else "?"
+        self._status_var.set(f"🟢 Đã đăng nhập: {name}")
+        self._log(f"Đã đăng nhập thành công: {name}", "ok")
+
+    # ── GROUPS TAB ────────────────────────────────────────────────────────────
+
+    def _build_groups_tab(self):
+        tab = self._tab_groups
+
+        top = tk.Frame(tab, bg=COLOR_BG)
+        top.pack(fill="x", padx=16, pady=(12, 6))
+
+        tk.Label(top, text="Danh sách nhóm Facebook của bạn",
+                 bg=COLOR_BG, fg=COLOR_TEXT, font=("Segoe UI", 12, "bold")).pack(side="left")
+
+        btn_frame = tk.Frame(top, bg=COLOR_BG)
+        btn_frame.pack(side="right")
+
+        HoverButton(
+            btn_frame, text="🔍  Quét nhóm", command=self._scan_groups,
+            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 10, "bold"),
+            relief="flat", cursor="hand2", padx=14, pady=6,
+        ).pack(side="left", padx=4)
+
+        HoverButton(
+            btn_frame, text="✅  Chọn tất cả", command=self._select_all_groups,
+            bg=COLOR_CARD, fg=COLOR_TEXT, font=("Segoe UI", 10),
+            relief="flat", cursor="hand2", padx=10, pady=6,
+        ).pack(side="left", padx=4)
+
+        HoverButton(
+            btn_frame, text="❌  Bỏ chọn tất cả", command=self._deselect_all_groups,
+            bg=COLOR_CARD, fg=COLOR_TEXT, font=("Segoe UI", 10),
+            relief="flat", cursor="hand2", padx=10, pady=6,
+        ).pack(side="left", padx=4)
+
+        HoverButton(
+            btn_frame, text="💾  Lưu danh sách", command=self._save_groups,
+            bg=COLOR_ACCENT2, fg="white", font=("Segoe UI", 10),
+            relief="flat", cursor="hand2", padx=10, pady=6,
+        ).pack(side="left", padx=4)
+
+        HoverButton(
+            btn_frame, text="📂  Tải từ file", command=self._load_groups_file,
+            bg=COLOR_ACCENT2, fg="white", font=("Segoe UI", 10),
+            relief="flat", cursor="hand2", padx=10, pady=6,
+        ).pack(side="left", padx=4)
+
+        # Scan progress
+        self._scan_progress_var = tk.StringVar(value="")
+        tk.Label(tab, textvariable=self._scan_progress_var, bg=COLOR_BG,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 9)).pack(anchor="w", padx=16)
+
+        # Group list with checkboxes
+        list_frame = tk.Frame(tab, bg=COLOR_PANEL)
+        list_frame.pack(fill="both", expand=True, padx=16, pady=(4, 12))
+
+        canvas = tk.Canvas(list_frame, bg=COLOR_PANEL, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        self._groups_inner = tk.Frame(canvas, bg=COLOR_PANEL)
+
+        self._groups_inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=self._groups_inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Bind mousewheel
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+
+        self._group_vars: list[tuple[tk.BooleanVar, dict]] = []
+        self._groups_canvas = canvas
+
+        # Count label
+        self._group_count_var = tk.StringVar(value="0 nhóm — 0 đã chọn")
+        tk.Label(tab, textvariable=self._group_count_var, bg=COLOR_BG,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(0, 8))
+
+    def _scan_groups(self):
+        if not self.backend.logged_in:
+            messagebox.showwarning("Chưa đăng nhập", "Vui lòng đăng nhập trước.")
+            return
+
+        self._scan_progress_var.set("🔄 Đang quét nhóm…")
+
+        def _worker():
+            groups = self.backend.scan_groups(
+                progress_cb=lambda msg: self.after(0, lambda m=msg: self._scan_progress_var.set(m))
+            )
+            self.after(0, lambda: self._on_groups_loaded(groups))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_groups_loaded(self, groups: list[dict]):
+        self.groups = groups
+        self._scan_progress_var.set(f"✅ Quét xong — tìm thấy {len(groups)} nhóm")
+        self._render_group_list()
+        self._log(f"Quét xong: {len(groups)} nhóm", "ok")
+
+    def _render_group_list(self):
+        for w in self._groups_inner.winfo_children():
+            w.destroy()
+        self._group_vars.clear()
+
+        for g in self.groups:
+            var = tk.BooleanVar(value=True)
+            self._group_vars.append((var, g))
+
+            row = tk.Frame(self._groups_inner, bg=COLOR_PANEL)
+            row.pack(fill="x", padx=8, pady=1)
+
+            cb = tk.Checkbutton(
+                row, variable=var, bg=COLOR_PANEL,
+                activebackground=COLOR_PANEL, selectcolor=COLOR_CARD,
+                command=self._update_group_count,
+            )
+            cb.pack(side="left")
+
+            tk.Label(row, text=g["name"], bg=COLOR_PANEL, fg=COLOR_TEXT,
+                     font=("Segoe UI", 10), anchor="w").pack(side="left")
+            tk.Label(row, text=f"  [{g['id']}]", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                     font=("Segoe UI", 9)).pack(side="left")
+
+        self._update_group_count()
+
+    def _select_all_groups(self):
+        for var, _ in self._group_vars:
+            var.set(True)
+        self._update_group_count()
+
+    def _deselect_all_groups(self):
+        for var, _ in self._group_vars:
+            var.set(False)
+        self._update_group_count()
+
+    def _update_group_count(self):
+        total = len(self._group_vars)
+        selected = sum(1 for v, _ in self._group_vars if v.get())
+        self._group_count_var.set(f"{total} nhóm — {selected} đã chọn")
+
+    def _save_groups(self):
+        if not self.groups:
+            messagebox.showinfo("Trống", "Chưa có nhóm nào. Hãy quét trước.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Lưu danh sách nhóm",
+        )
+        if path:
+            Path(path).write_text(json.dumps(self.groups, ensure_ascii=False, indent=2), encoding="utf-8")
+            messagebox.showinfo("Đã lưu", f"Đã lưu {len(self.groups)} nhóm vào:\n{path}")
+
+    def _load_groups_file(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Tải danh sách nhóm",
+        )
+        if path:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.groups = data
+            self._on_groups_loaded(data)
+
+    # ── POST TAB ──────────────────────────────────────────────────────────────
+
+    def _build_post_tab(self):
+        tab = self._tab_post
+
+        # Left: compose
+        left = tk.Frame(tab, bg=COLOR_BG)
+        left.pack(side="left", fill="both", expand=True, padx=(16, 8), pady=12)
+
+        tk.Label(left, text="Soạn bài đăng", bg=COLOR_BG, fg=COLOR_TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+
+        tk.Label(left, text="Nội dung bài đăng:", bg=COLOR_BG, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 10)).pack(anchor="w")
+
+        self._msg_text = scrolledtext.ScrolledText(
+            left, height=10, bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG,
+            insertbackground=COLOR_TEXT, relief="flat",
+            font=("Segoe UI", 11), wrap=tk.WORD,
+        )
+        self._msg_text.pack(fill="both", expand=True, pady=(4, 10))
+
+        # Image
+        img_row = tk.Frame(left, bg=COLOR_BG)
+        img_row.pack(fill="x", pady=4)
+        tk.Label(img_row, text="Ảnh đính kèm (tuỳ chọn):", bg=COLOR_BG,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 10)).pack(side="left")
+
+        self._image_var = tk.StringVar()
+        img_entry = tk.Entry(img_row, textvariable=self._image_var, width=32,
+                             bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+                             relief="flat", font=("Segoe UI", 10))
+        img_entry.pack(side="left", padx=(8, 4), ipady=4)
+
+        HoverButton(
+            img_row, text="📁", command=self._browse_image,
+            bg=COLOR_CARD, fg=COLOR_TEXT, relief="flat", cursor="hand2",
+            font=("Segoe UI", 11), padx=6,
+        ).pack(side="left")
+
+        HoverButton(
+            img_row, text="✖", command=lambda: self._image_var.set(""),
+            bg=COLOR_CARD, fg=COLOR_ERROR, relief="flat", cursor="hand2",
+            font=("Segoe UI", 11), padx=6,
+        ).pack(side="left", padx=4)
+
+        # Delay
+        delay_row = tk.Frame(left, bg=COLOR_BG)
+        delay_row.pack(fill="x", pady=8)
+        tk.Label(delay_row, text="Delay giữa các bài (giây):", bg=COLOR_BG,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 10)).pack(side="left")
+        self._delay_var = tk.DoubleVar(value=20)
+        delay_spin = tk.Spinbox(
+            delay_row, from_=5, to=300, textvariable=self._delay_var,
+            width=6, bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, relief="flat",
+            font=("Segoe UI", 11), buttonbackground=COLOR_CARD,
+            insertbackground=COLOR_TEXT,
+        )
+        delay_spin.pack(side="left", padx=(8, 4), ipady=3)
+        tk.Label(delay_row, text="giây", bg=COLOR_BG, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 10)).pack(side="left")
+
+        # Buttons
+        btn_row = tk.Frame(left, bg=COLOR_BG)
+        btn_row.pack(fill="x", pady=(8, 0))
+
+        self._post_btn = HoverButton(
+            btn_row, text="  🚀  Bắt đầu đăng bài  ", command=self._start_posting,
+            bg=COLOR_BUTTON, fg="white", font=("Segoe UI", 12, "bold"),
+            relief="flat", cursor="hand2", padx=24, pady=10,
+        )
+        self._post_btn.pack(side="left", padx=(0, 8))
+
+        self._stop_btn = HoverButton(
+            btn_row, text="⏹  Dừng", command=self._stop_posting,
+            bg=COLOR_CARD, fg=COLOR_ERROR, font=("Segoe UI", 11, "bold"),
+            relief="flat", cursor="hand2", padx=16, pady=10, state="disabled",
+        )
+        self._stop_btn.pack(side="left")
+
+        # Right: progress
+        right = tk.Frame(tab, bg=COLOR_PANEL, width=280)
+        right.pack(side="right", fill="y", padx=(0, 16), pady=12)
+        right.pack_propagate(False)
+
+        tk.Label(right, text="Tiến trình đăng bài", bg=COLOR_PANEL, fg=COLOR_TEXT,
+                 font=("Segoe UI", 11, "bold")).pack(pady=(12, 6), padx=12, anchor="w")
+
+        # Progress bar
+        style = ttk.Style()
+        style.configure("Red.Horizontal.TProgressbar",
+                        troughcolor=COLOR_INPUT_BG, background=COLOR_ACCENT)
+        self._progress_var = tk.DoubleVar(value=0)
+        self._progress_bar = ttk.Progressbar(
+            right, variable=self._progress_var,
+            style="Red.Horizontal.TProgressbar",
+            maximum=100, length=240,
+        )
+        self._progress_bar.pack(padx=12, pady=(0, 8))
+
+        self._progress_label = tk.Label(right, text="0 / 0", bg=COLOR_PANEL,
+                                        fg=COLOR_TEXT_DIM, font=("Segoe UI", 10))
+        self._progress_label.pack()
+
+        # Stats
+        stats = tk.Frame(right, bg=COLOR_PANEL)
+        stats.pack(fill="x", padx=12, pady=8)
+
+        def stat_lbl(text, color):
+            f = tk.Frame(stats, bg=COLOR_PANEL)
+            f.pack(fill="x", pady=3)
+            lbl = tk.Label(f, text="0", bg=COLOR_PANEL, fg=color,
+                           font=("Segoe UI", 18, "bold"))
+            lbl.pack(side="left")
+            tk.Label(f, text=f"  {text}", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                     font=("Segoe UI", 10)).pack(side="left")
+            return lbl
+
+        self._ok_lbl = stat_lbl("Thành công", COLOR_SUCCESS)
+        self._err_lbl = stat_lbl("Thất bại", COLOR_ERROR)
+        self._skip_lbl = stat_lbl("Đang chờ", COLOR_WARNING)
+
+        # Mini log in post tab
+        tk.Label(right, text="Log nhanh:", bg=COLOR_PANEL, fg=COLOR_TEXT_DIM,
+                 font=("Segoe UI", 9)).pack(padx=12, anchor="w", pady=(12, 2))
+        self._mini_log = LogBox(right, height=10, font=("Consolas", 8))
+        self._mini_log.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+
+    def _browse_image(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp"), ("All files", "*.*")],
+            title="Chọn ảnh đính kèm",
+        )
+        if path:
+            self._image_var.set(path)
+
+    def _get_selected_groups(self) -> list[dict]:
+        return [g for var, g in self._group_vars if var.get()]
+
+    def _start_posting(self):
+        if not self.backend.logged_in:
+            messagebox.showwarning("Chưa đăng nhập", "Vui lòng đăng nhập trước.")
+            return
+
+        message = self._msg_text.get("1.0", "end").strip()
+        if not message:
+            messagebox.showwarning("Thiếu nội dung", "Vui lòng nhập nội dung bài đăng.")
+            return
+
+        groups = self._get_selected_groups()
+        if not groups:
+            messagebox.showwarning("Chưa chọn nhóm", "Vui lòng chọn ít nhất một nhóm.")
+            return
+
+        image = self._image_var.get().strip() or None
+        delay = float(self._delay_var.get())
+
+        self._posting = True
+        self._stop_flag = False
+        self._post_btn.config(state="disabled")
+        self._stop_btn.config(state="normal")
+        self._ok_lbl.config(text="0")
+        self._err_lbl.config(text="0")
+        self._skip_lbl.config(text=str(len(groups)))
+        self._progress_var.set(0)
+        self._progress_label.config(text=f"0 / {len(groups)}")
+        self._mini_log.clear()
+        self._log(f"Bắt đầu đăng bài vào {len(groups)} nhóm…", "bold")
+
+        def _worker():
+            ok_count = 0
+            err_count = 0
+            for idx, g in enumerate(groups):
+                if self._stop_flag:
+                    self.after(0, lambda: self._log("⏹ Đã dừng bởi người dùng.", "warn"))
+                    break
+
+                gid = g["id"]
+                gname = g["name"]
+                self.after(0, lambda n=gname: self._log(f"→ Đang đăng: {n}…", "info"))
+
+                success, msg_result = self.backend.post_to_group(gid, message, image)
+
+                def _update(i=idx, ok=success, name=gname, res=msg_result, ok_c=ok_count, err_c=err_count):
+                    pass  # handled below
+
+                if success:
+                    ok_count += 1
+                else:
+                    err_count += 1
+
+                remaining = len(groups) - idx - 1
+                pct = ((idx + 1) / len(groups)) * 100
+
+                self.after(0, lambda ok=success, name=gname, res=msg_result,
+                                      o=ok_count, e=err_count, r=remaining, p=pct, i=idx+1, t=len(groups): (
+                    self._ok_lbl.config(text=str(o)),
+                    self._err_lbl.config(text=str(e)),
+                    self._skip_lbl.config(text=str(r)),
+                    self._progress_var.set(p),
+                    self._progress_label.config(text=f"{i} / {t}"),
+                    self._mini_log.log(
+                        f"{'✓' if ok else '✗'} {name}: {res}",
+                        "ok" if ok else "err",
+                    ),
+                    self._log(
+                        f"[{i}/{t}] {'✅' if ok else '❌'} {name} — {res}",
+                        "ok" if ok else "err",
+                    ),
+                ))
+
+                if idx < len(groups) - 1 and not self._stop_flag:
+                    time.sleep(delay)
+
+            self.after(0, self._on_posting_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _stop_posting(self):
+        self._stop_flag = True
+        self._stop_btn.config(state="disabled")
+        self._log("⏹ Đang dừng sau bài hiện tại…", "warn")
+
+    def _on_posting_done(self):
+        self._posting = False
+        self._post_btn.config(state="normal")
+        self._stop_btn.config(state="disabled")
+        ok = int(self._ok_lbl.cget("text"))
+        err = int(self._err_lbl.cget("text"))
+        self._log(f"✅ Hoàn thành! {ok} thành công, {err} thất bại.", "bold")
+        messagebox.showinfo("Hoàn thành", f"Đã đăng bài xong!\n✅ {ok} thành công\n❌ {err} thất bại")
+
+    # ── LOG TAB ───────────────────────────────────────────────────────────────
+
+    def _build_log_tab(self):
+        tab = self._tab_log
+        top = tk.Frame(tab, bg=COLOR_BG)
+        top.pack(fill="x", padx=16, pady=(12, 4))
+
+        tk.Label(top, text="Nhật ký hoạt động", bg=COLOR_BG, fg=COLOR_TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(side="left")
+
+        HoverButton(
+            top, text="🗑  Xóa log", command=lambda: self._full_log.clear(),
+            bg=COLOR_CARD, fg=COLOR_TEXT, relief="flat", cursor="hand2",
+            font=("Segoe UI", 10), padx=10, pady=4,
+        ).pack(side="right")
+
+        self._full_log = LogBox(tab, font=("Consolas", 9))
+        self._full_log.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+    def _log(self, msg: str, tag: str = ""):
+        self._full_log.log(msg, tag)
+
+    # ──────────────────────────────────────────────────────────────────────────
+
+
+def main():
+    app = App()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
