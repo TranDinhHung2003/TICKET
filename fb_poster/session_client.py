@@ -75,57 +75,66 @@ class FacebookSessionClient:
         """
         logger.info("Đang đăng nhập với tài khoản: %s", email)
 
-        # Bước 1: Lấy trang đăng nhập để lấy các trường ẩn (lm, jazoest, ...)
-        resp = self.session.get(f"{MOBILE_URL}/login/", timeout=30)
-        resp.raise_for_status()
+        # Thử nhiều endpoint
+        html = ""
+        form_action = ""
+        for endpoint in [f"{MOBILE_URL}/login/", "https://m.facebook.com/login/", f"{MOBILE_URL}/"]:
+            try:
+                resp = self.session.get(endpoint, timeout=30)
+                if "login" in resp.text.lower() or "email" in resp.text.lower():
+                    html = resp.text
+                    m = re.search(r'<form[^>]+action=["\']([^"\']*login[^"\']*)["\']', html, re.I)
+                    if m:
+                        form_action = m.group(1)
+                    break
+            except Exception:
+                continue
 
-        form_data = self._extract_login_form(resp.text)
-        if not form_data:
-            raise SessionLoginError("Không thể đọc form đăng nhập từ Facebook.")
+        if not html:
+            raise SessionLoginError("Không thể kết nối tới Facebook.")
 
-        # Bước 2: Submit form đăng nhập
-        form_data.update({"email": email, "pass": password})
-        login_resp = self.session.post(
-            f"{MOBILE_URL}/login/device-based/regular/login/",
-            data=form_data,
-            allow_redirects=True,
-            timeout=30,
-        )
+        form_data = self._extract_login_form(html)
+        form_data["email"] = email
+        form_data["pass"] = password
 
-        # Kiểm tra đăng nhập thành công
-        if self._is_logged_in(login_resp.text):
+        if form_action:
+            submit_url = form_action if form_action.startswith("http") else f"{MOBILE_URL}{form_action}"
+        else:
+            submit_url = f"{MOBILE_URL}/login/device-based/regular/login/?refsrc=deprecated"
+
+        login_resp = self.session.post(submit_url, data=form_data, allow_redirects=True, timeout=30)
+
+        cookies_dict = {c.name: c.value for c in self.session.cookies}
+        if "c_user" in cookies_dict or self._is_logged_in(login_resp.text):
             self._logged_in = True
             logger.info("Đăng nhập thành công!")
             return True
 
-        # Kiểm tra các thông báo lỗi phổ biến
         if "checkpoint" in login_resp.url or "checkpoint" in login_resp.text:
             raise SessionLoginError(
                 "Facebook yêu cầu xác minh bảo mật (checkpoint). "
                 "Hãy đăng nhập thủ công trên trình duyệt trước, "
-                "sau đó dùng lệnh 'fb-poster session export-cookies' để lấy cookies."
+                "sau đó dùng lệnh 'fb-poster session set-cookies' để nhập cookies."
             )
-        if "incorrect" in login_resp.text.lower() or "wrong" in login_resp.text.lower():
-            raise SessionLoginError("Email hoặc mật khẩu không đúng.")
 
         raise SessionLoginError(
             "Đăng nhập thất bại. Facebook có thể đang chặn đăng nhập tự động. "
-            "Hãy thử xuất cookies từ trình duyệt (xem hướng dẫn bên dưới)."
+            "Hãy thử dùng cookies từ trình duyệt thay thế."
         )
 
     def _extract_login_form(self, html: str) -> dict:
-        """Trích xuất các trường form ẩn từ trang đăng nhập."""
+        """Trích xuất tất cả input fields từ trang đăng nhập."""
         fields = {}
-        for name, value in re.findall(
-            r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']',
-            html,
-        ):
-            fields[name] = value
-        for name, value in re.findall(
-            r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']([^"\']+)["\']',
-            html,
-        ):
-            fields[name] = value
+        for input_tag in re.finditer(r'<input\b([^>]*?)/?>', html, re.I | re.S):
+            attrs_str = input_tag.group(1)
+            attrs = {}
+            for m in re.finditer(r'\b(\w+)\s*=\s*["\']([^"\']*)["\']', attrs_str):
+                attrs[m.group(1).lower()] = m.group(2)
+            name = attrs.get("name", "")
+            value = attrs.get("value", "")
+            itype = attrs.get("type", "text").lower()
+            if name and itype not in ("submit", "button", "image", "reset"):
+                fields[name] = value
         return fields
 
     def _is_logged_in(self, html: str) -> bool:

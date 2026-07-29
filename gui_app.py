@@ -87,44 +87,112 @@ class FacebookBackend:
 
     def login(self, email: str, password: str) -> tuple[bool, str]:
         try:
-            resp = self.session.get(f"{MOBILE_URL}/login/", timeout=30)
-            form_data = self._extract_form_fields(resp.text)
-            if not form_data:
-                return False, "Không đọc được form đăng nhập."
-            form_data.update({"email": email, "pass": password})
+            # Thử nhiều endpoint mobile của Facebook
+            login_endpoints = [
+                f"{MOBILE_URL}/login/",
+                "https://m.facebook.com/login/",
+                f"{MOBILE_URL}/",
+            ]
+
+            html = ""
+            form_action = ""
+            for endpoint in login_endpoints:
+                try:
+                    resp = self.session.get(endpoint, timeout=30)
+                    if "login" in resp.text.lower() or "email" in resp.text.lower():
+                        html = resp.text
+                        # Tìm action của form login
+                        m = re.search(
+                            r'<form[^>]+action=["\']([^"\']*login[^"\']*)["\']',
+                            html, re.I
+                        )
+                        if m:
+                            form_action = m.group(1)
+                        break
+                except Exception:
+                    continue
+
+            if not html:
+                return False, "Không thể kết nối tới Facebook. Kiểm tra mạng."
+
+            form_data = self._extract_form_fields(html)
+
+            # Thêm email/pass vào form
+            form_data["email"] = email
+            form_data["pass"] = password
+
+            # Xác định URL submit
+            if form_action:
+                if form_action.startswith("http"):
+                    submit_url = form_action
+                else:
+                    submit_url = f"{MOBILE_URL}{form_action}"
+            else:
+                submit_url = f"{MOBILE_URL}/login/device-based/regular/login/?refsrc=deprecated"
+
             login_resp = self.session.post(
-                f"{MOBILE_URL}/login/device-based/regular/login/",
+                submit_url,
                 data=form_data,
                 allow_redirects=True,
                 timeout=30,
             )
+
+            # Kiểm tra checkpoint/2FA
             if "checkpoint" in login_resp.url or "checkpoint" in login_resp.text:
                 return False, (
-                    "Facebook yêu cầu xác minh bảo mật!\n"
-                    "Hãy đăng nhập thủ công trên trình duyệt,\n"
-                    "sau đó dùng tab 'Cookies' để nhập cookies."
+                    "Facebook yêu cầu xác minh bảo mật (checkpoint)!\n\n"
+                    "Hãy dùng tab 'Nhập Cookies' thay thế:\n"
+                    "1. Đăng nhập Facebook trên Chrome\n"
+                    "2. Cài extension 'Cookie-Editor'\n"
+                    "3. Export → Header String → Dán vào tab Cookies"
                 )
-            if self._check_logged_in(login_resp.text):
+
+            # Kiểm tra đăng nhập thành công
+            cookies_dict = {c.name: c.value for c in self.session.cookies}
+            if "c_user" in cookies_dict or self._check_logged_in(login_resp.text):
                 self.logged_in = True
                 return True, "Đăng nhập thành công!"
-            return False, "Email hoặc mật khẩu không đúng."
+
+            # Kiểm tra thông báo lỗi từ Facebook
+            error_patterns = [
+                r'id="error_box"[^>]*>([^<]+)',
+                r'class="[^"]*error[^"]*"[^>]*>\s*<[^>]+>\s*([^<]{5,100})',
+                r'The password[^<]+',
+                r'Mật khẩu[^<]+không đúng[^<]*',
+            ]
+            for pat in error_patterns:
+                m = re.search(pat, login_resp.text, re.I)
+                if m:
+                    return False, f"Lỗi: {m.group(0)[:120]}"
+
+            return False, (
+                "Đăng nhập thất bại.\n"
+                "Facebook có thể đang chặn đăng nhập tự động.\n"
+                "Vui lòng dùng tab 'Nhập Cookies' thay thế."
+            )
         except Exception as exc:
             return False, f"Lỗi kết nối: {exc}"
 
     def _extract_form_fields(self, html: str) -> dict:
+        """Trích xuất tất cả input fields từ HTML (mọi thứ tự thuộc tính)."""
         fields = {}
-        for m in re.finditer(
-            r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']', html
-        ):
-            fields[m.group(1)] = m.group(2)
-        for m in re.finditer(
-            r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']([^"\']+)["\']', html
-        ):
-            fields[m.group(2)] = m.group(1)
+        # Tìm tất cả thẻ <input ...>
+        for input_tag in re.finditer(r'<input\b([^>]*?)/?>', html, re.I | re.S):
+            attrs_str = input_tag.group(1)
+            # Lấy tất cả cặp key=value trong thẻ
+            attrs = {}
+            for m in re.finditer(r'\b(\w+)\s*=\s*["\']([^"\']*)["\']', attrs_str):
+                attrs[m.group(1).lower()] = m.group(2)
+            name = attrs.get("name", "")
+            value = attrs.get("value", "")
+            input_type = attrs.get("type", "text").lower()
+            # Bỏ qua submit, button, image, reset
+            if name and input_type not in ("submit", "button", "image", "reset"):
+                fields[name] = value
         return fields
 
     def _check_logged_in(self, html: str) -> bool:
-        return any(x in html for x in ["logout", "c_user", "mbasic_logout"])
+        return any(x in html for x in ["logout", "c_user", "mbasic_logout", "log_out"])
 
     def get_profile_name(self) -> str:
         try:
@@ -230,17 +298,18 @@ class FacebookBackend:
         return m.group(1) if m else ""
 
     def _extract_hidden_fields(self, html: str) -> dict:
+        """Trích xuất các hidden input field."""
         fields = {}
-        for m in re.finditer(
-            r'<input[^>]+type=["\']hidden["\'][^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']',
-            html, re.I
-        ):
-            fields[m.group(1)] = m.group(2)
-        for m in re.finditer(
-            r'<input[^>]+name=["\']([^"\']+)["\'][^>]+type=["\']hidden["\'][^>]+value=["\']([^"\']*)["\']',
-            html, re.I
-        ):
-            fields[m.group(1)] = m.group(2)
+        for input_tag in re.finditer(r'<input\b([^>]*?)/?>', html, re.I | re.S):
+            attrs_str = input_tag.group(1)
+            attrs = {}
+            for m in re.finditer(r'\b(\w+)\s*=\s*["\']([^"\']*)["\']', attrs_str):
+                attrs[m.group(1).lower()] = m.group(2)
+            name = attrs.get("name", "")
+            value = attrs.get("value", "")
+            itype = attrs.get("type", "").lower()
+            if name and itype in ("hidden", ""):
+                fields[name] = value
         return fields
 
     def _post_ok(self, html: str) -> bool:
@@ -489,6 +558,18 @@ class App(tk.Tk):
             self._on_login_success_ui()
         else:
             self._login_status.config(text=f"❌ {msg}", fg=COLOR_ERROR)
+            # Nếu lỗi liên quan tới form/block, gợi ý dùng cookies
+            if "checkpoint" in msg or "chặn" in msg or "thất bại" in msg or "form" in msg:
+                messagebox.showinfo(
+                    "Gợi ý: Dùng Cookies",
+                    "Đăng nhập bằng email/mật khẩu thất bại.\n\n"
+                    "👉 Hãy dùng tab 'Nhập Cookies':\n\n"
+                    "1. Mở Chrome, đăng nhập Facebook bình thường\n"
+                    "2. Cài extension 'Cookie-Editor' (miễn phí)\n"
+                    "   https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm\n"
+                    "3. Mở extension → Export → Header String → Copy\n"
+                    "4. Quay lại tab 'Nhập Cookies' → Dán vào ô → Xác nhận",
+                )
 
     def _do_set_cookies(self):
         cookie_str = self._cookie_text.get("1.0", "end").strip()
