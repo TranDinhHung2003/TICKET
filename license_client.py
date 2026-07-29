@@ -18,7 +18,7 @@ import requests
 
 DEFAULT_SERVER = os.environ.get(
     "FB_LICENSE_SERVER",
-    "http://127.0.0.1:8787",
+    "http://127.0.0.1:8080",
 )
 
 DATA_DIR = Path.home() / ".fb_poster"
