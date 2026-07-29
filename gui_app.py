@@ -255,46 +255,148 @@ class FacebookBackend:
         return "Người dùng Facebook"
 
     def scan_groups(self, progress_cb=None) -> list[dict]:
-        groups = []
-        seen = set()
+        """
+        Quét danh sách nhóm từ nhiều endpoint khác nhau.
+        Ưu tiên endpoint trả nhiều nhóm nhất.
+        """
+        groups: list[dict] = []
+        seen: set[str] = set()
 
-        urls_to_try = [
+        # Danh sách endpoint sẽ thử theo thứ tự
+        scan_urls = [
             f"{MOBILE_URL}/groups/?seemore=1",
             f"{MOBILE_URL}/groups/",
+            "https://m.facebook.com/groups/?seemore=1",
+            "https://m.facebook.com/groups/",
+            f"{MOBILE_URL}/groups/feed/",
+            f"{MOBILE_URL}/me/groups/",
         ]
 
-        for url in urls_to_try:
+        raw_pages: list[str] = []
+
+        for url in scan_urls:
             try:
                 if progress_cb:
-                    progress_cb(f"Đang quét: {url}")
+                    progress_cb(f"🔍 Đang quét: {url}")
                 resp = self.session.get(url, timeout=30)
-                self._extract_groups_from_html(resp.text, groups, seen)
+                html = resp.text
+                raw_pages.append(html)
 
-                # Theo dõi phân trang
-                next_links = re.findall(r'href="(/groups/\?[^"]*)"', resp.text)
-                for link in next_links[:3]:
+                # Theo dõi tất cả link phân trang (xem thêm)
+                more_links = re.findall(
+                    r'href="(/groups/[^"]*(?:seemore|cursor|after)[^"]*)"', html
+                )
+                for link in more_links[:5]:
                     try:
                         r2 = self.session.get(f"{MOBILE_URL}{link}", timeout=20)
-                        self._extract_groups_from_html(r2.text, groups, seen)
+                        raw_pages.append(r2.text)
                     except Exception:
                         pass
             except Exception as exc:
                 if progress_cb:
-                    progress_cb(f"Lỗi quét {url}: {exc}")
+                    progress_cb(f"⚠️ Bỏ qua {url}: {exc}")
+
+        if progress_cb:
+            progress_cb("🔍 Đang trích xuất danh sách nhóm…")
+
+        for html in raw_pages:
+            self._extract_groups_from_html(html, groups, seen)
+
+        # Nếu vẫn không tìm thấy, thử lấy qua GraphQL API nội bộ
+        if not groups:
+            if progress_cb:
+                progress_cb("🔍 Thử phương pháp khác (GraphQL)…")
+            gql_groups = self._scan_groups_graphql(progress_cb)
+            for g in gql_groups:
+                if g["id"] not in seen:
+                    seen.add(g["id"])
+                    groups.append(g)
 
         return groups
 
     def _extract_groups_from_html(self, html: str, groups: list, seen: set):
-        patterns = [
-            r'href="/groups/(\d+)[^"]*"[^>]*>\s*([^<]{3,60})\s*<',
-            r'/groups/(\d+)/?["\'].*?>\s*([^<]{3,60})<',
-        ]
-        for pattern in patterns:
-            for gid, name in re.findall(pattern, html):
-                name = re.sub(r'\s+', ' ', name).strip()
-                if gid not in seen and len(name) > 2 and not name.startswith("http"):
+        """Trích xuất ID + tên nhóm từ HTML với nhiều pattern khác nhau."""
+
+        # Pattern 1: link /groups/ID/  kèm tên trong thẻ tiếp theo
+        for m in re.finditer(
+            r'href="(?:https?://[^/]+)?/groups/(\d+)/?[^"]*"[^>]*>([^<]{2,80})<',
+            html, re.I
+        ):
+            gid, name = m.group(1), m.group(2).strip()
+            name = re.sub(r'\s+', ' ', name).strip()
+            if gid not in seen and self._valid_name(name):
+                seen.add(gid)
+                groups.append({"id": gid, "name": name})
+
+        # Pattern 2: link /groups/ID rồi tên nằm bên trong vài thẻ sau
+        for m in re.finditer(
+            r'href="(?:https?://[^/]+)?/groups/(\d+)/?[^"]*"', html, re.I
+        ):
+            gid = m.group(1)
+            if gid in seen:
+                continue
+            # Tìm text gần nhất sau href này
+            snippet = html[m.start():m.start() + 400]
+            texts = re.findall(r'>([^<]{3,80})<', snippet)
+            for t in texts:
+                t = re.sub(r'\s+', ' ', t).strip()
+                if self._valid_name(t):
                     seen.add(gid)
-                    groups.append({"id": gid, "name": name})
+                    groups.append({"id": gid, "name": t})
+                    break
+
+        # Pattern 3: data-groupid / data-group-id attribute
+        for m in re.finditer(
+            r'data-(?:group-?id|id)=["\'](\d{8,})["\'][^>]*>([^<]{2,80})<', html, re.I
+        ):
+            gid, name = m.group(1), m.group(2).strip()
+            if gid not in seen and self._valid_name(name):
+                seen.add(gid)
+                groups.append({"id": gid, "name": name})
+
+    def _valid_name(self, name: str) -> bool:
+        """Kiểm tra tên nhóm có hợp lệ không."""
+        if not name or len(name) < 3 or len(name) > 100:
+            return False
+        # Loại bỏ các chuỗi không phải tên nhóm
+        skip = {"xem thêm", "see more", "like", "comment", "share", "đăng ký",
+                 "groups", "bình luận", "thích", "chia sẻ", "tham gia", "join",
+                 "home", "trang chủ", "tin tức", "news feed"}
+        if name.lower() in skip:
+            return False
+        if name.startswith("http") or name.startswith("/"):
+            return False
+        # Phải có ít nhất 1 chữ cái
+        if not re.search(r'[a-zA-ZÀ-ỹ]', name):
+            return False
+        return True
+
+    def _scan_groups_graphql(self, progress_cb=None) -> list[dict]:
+        """Thử lấy nhóm qua endpoint GraphQL nội bộ của Facebook."""
+        groups: list[dict] = []
+        try:
+            # Lấy __user và __a token từ cookies/header
+            cookies_dict = {c.name: c.value for c in self.session.cookies}
+            uid = cookies_dict.get("c_user", "")
+            if not uid:
+                return groups
+
+            # Gọi API groups của user
+            url = f"{MOBILE_URL}/{uid}/groups/"
+            if progress_cb:
+                progress_cb(f"🔍 Quét profile groups: {url}")
+            resp = self.session.get(url, timeout=30)
+            seen: set[str] = set()
+            self._extract_groups_from_html(resp.text, groups, seen)
+
+            # Thử thêm trang app/groups
+            url2 = f"{MOBILE_URL}/app/groups/"
+            resp2 = self.session.get(url2, timeout=20)
+            self._extract_groups_from_html(resp2.text, groups, seen)
+
+        except Exception:
+            pass
+        return groups
 
     def post_to_group(self, group_id: str, message: str, image_path: str = None) -> tuple[bool, str]:
         try:
@@ -693,6 +795,42 @@ class App(tk.Tk):
         tk.Label(tab, textvariable=self._scan_progress_var, bg=COLOR_BG,
                  fg=COLOR_TEXT_DIM, font=("Segoe UI", 9)).pack(anchor="w", padx=16)
 
+        # ── Nhập ID nhóm thủ công ───────────────────────────────────────
+        manual_frame = tk.Frame(tab, bg=COLOR_PANEL)
+        manual_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+        tk.Label(manual_frame, text="➕ Thêm nhóm thủ công:", bg=COLOR_PANEL,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 9)).pack(side="left", padx=(8, 4))
+
+        self._manual_id_var = tk.StringVar()
+        tk.Entry(
+            manual_frame, textvariable=self._manual_id_var, width=20,
+            bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+            relief="flat", font=("Segoe UI", 9),
+        ).pack(side="left", ipady=3, padx=(0, 4))
+
+        tk.Label(manual_frame, text="Tên:", bg=COLOR_PANEL,
+                 fg=COLOR_TEXT_DIM, font=("Segoe UI", 9)).pack(side="left")
+
+        self._manual_name_var = tk.StringVar()
+        tk.Entry(
+            manual_frame, textvariable=self._manual_name_var, width=24,
+            bg=COLOR_INPUT_BG, fg=COLOR_INPUT_FG, insertbackground=COLOR_TEXT,
+            relief="flat", font=("Segoe UI", 9),
+        ).pack(side="left", ipady=3, padx=(4, 4))
+
+        HoverButton(
+            manual_frame, text="Thêm", command=self._add_manual_group,
+            bg=COLOR_ACCENT2, fg="white", relief="flat", cursor="hand2",
+            font=("Segoe UI", 9, "bold"), padx=10, pady=3,
+        ).pack(side="left")
+
+        tk.Label(
+            manual_frame,
+            text="(ID nhóm: lấy từ URL facebook.com/groups/ID)",
+            bg=COLOR_PANEL, fg=COLOR_TEXT_DIM, font=("Segoe UI", 8),
+        ).pack(side="left", padx=(8, 0))
+
         # Group list with checkboxes
         list_frame = tk.Frame(tab, bg=COLOR_PANEL)
         list_frame.pack(fill="both", expand=True, padx=16, pady=(4, 12))
@@ -739,9 +877,30 @@ class App(tk.Tk):
 
     def _on_groups_loaded(self, groups: list[dict]):
         self.groups = groups
-        self._scan_progress_var.set(f"✅ Quét xong — tìm thấy {len(groups)} nhóm")
+        if groups:
+            self._scan_progress_var.set(f"✅ Quét xong — tìm thấy {len(groups)} nhóm")
+            self._log(f"Quét xong: {len(groups)} nhóm", "ok")
+        else:
+            self._scan_progress_var.set(
+                "⚠️ Không tìm thấy nhóm nào — Facebook thay đổi giao diện, hãy thêm thủ công bên dưới"
+            )
+            self._log("Quét nhóm không ra kết quả.", "warn")
+            self._log("➡ Hướng dẫn lấy ID nhóm:", "warn")
+            self._log("  1. Vào nhóm trên Facebook (Chrome)", "info")
+            self._log("  2. Xem URL: facebook.com/groups/ID_NHOM", "info")
+            self._log("  3. Nhập ID vào ô 'Thêm nhóm thủ công' bên dưới", "info")
+            messagebox.showinfo(
+                "Không tìm thấy nhóm tự động",
+                "Không quét được nhóm tự động.\n\n"
+                "Facebook thay đổi giao diện thường xuyên.\n\n"
+                "👉 Cách thêm nhóm thủ công:\n"
+                "1. Mở Chrome, vào facebook.com/groups\n"
+                "2. Bấm vào từng nhóm, xem URL:\n"
+                "   facebook.com/groups/123456789\n"
+                "3. Sao chép số ID (123456789)\n"
+                "4. Dán vào ô 'Thêm nhóm thủ công' trong app",
+            )
         self._render_group_list()
-        self._log(f"Quét xong: {len(groups)} nhóm", "ok")
 
     def _render_group_list(self):
         for w in self._groups_inner.winfo_children():
@@ -806,6 +965,39 @@ class App(tk.Tk):
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             self.groups = data
             self._on_groups_loaded(data)
+
+    def _add_manual_group(self):
+        gid = self._manual_id_var.get().strip()
+        name = self._manual_name_var.get().strip()
+
+        # Trích xuất ID từ URL nếu người dùng dán URL
+        url_m = re.search(r'facebook\.com/groups/(\d+)', gid)
+        if url_m:
+            gid = url_m.group(1)
+
+        if not gid or not gid.isdigit():
+            messagebox.showwarning(
+                "ID không hợp lệ",
+                "Vui lòng nhập ID nhóm (chỉ gồm chữ số).\n"
+                "Ví dụ: 123456789\n\n"
+                "Hoặc dán cả URL: https://www.facebook.com/groups/123456789",
+            )
+            return
+
+        if not name:
+            name = f"Nhóm {gid}"
+
+        # Kiểm tra trùng
+        existing_ids = {g["id"] for g in self.groups}
+        if gid in existing_ids:
+            messagebox.showinfo("Trùng", f"Nhóm ID {gid} đã có trong danh sách.")
+            return
+
+        self.groups.append({"id": gid, "name": name})
+        self._render_group_list()
+        self._manual_id_var.set("")
+        self._manual_name_var.set("")
+        self._log(f"Đã thêm nhóm thủ công: {name} ({gid})", "ok")
 
     # ── POST TAB ──────────────────────────────────────────────────────────────
 
