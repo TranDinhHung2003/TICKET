@@ -23,7 +23,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -757,13 +757,32 @@ class FacebookBackend:
         self._tokens_cache.clear()
         self._tokens_cache_time = 0.0
 
+        marker = self._extract_verify_marker(message)
+        if not marker:
+            marker = uuid.uuid4().hex[:6]
+            message = f"{message.rstrip()}\n\n#{marker}"
+
+        # Baseline: marker chưa được phép có trên nhóm trước khi đăng
+        if self._marker_visible_on_group(group_id, marker):
+            _prog(f"Mã #{marker} đã có sẵn trên nhóm — đổi mã và thử lại")
+            return "failed", f"Mã xác minh #{marker} đã tồn tại trên nhóm (trùng)"
+
         methods = [
             ("GraphQL", self._post_via_graphql),
-            ("Ajax", self._post_via_ajax_feed),
-            ("composer", self._post_via_composer_direct),
             ("mbasic", self._post_via_mobile),
+            ("composer", self._post_via_composer_direct),
             ("m.facebook", self._post_via_m_composer),
+            ("Ajax", self._post_via_ajax_feed),
         ]
+        # Sau bài đầu: ưu tiên mbasic (GraphQL hay echo/chặn spam)
+        if self._used_post_ids:
+            methods = [
+                ("mbasic", self._post_via_mobile),
+                ("composer", self._post_via_composer_direct),
+                ("m.facebook", self._post_via_m_composer),
+                ("GraphQL", self._post_via_graphql),
+                ("Ajax", self._post_via_ajax_feed),
+            ]
         last_err = "Không thể đăng bài"
         for name, method in methods:
             _prog(f"Thử {name}…")
@@ -777,8 +796,7 @@ class FacebookBackend:
                 _prog(f"{name}: {last_err}")
                 continue
 
-            # Bắt buộc xác minh lại trên nhóm — tránh báo thành công giả
-            _prog(f"{name} báo {status} → đang kiểm tra trên nhóm…")
+            _prog(f"{name} báo {status} → xác minh mã #{marker} trên nhóm…")
             post_id = None
             m = re.search(
                 r"(?:post[:\s]*|Đăng[^(]*\()([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})",
@@ -788,18 +806,21 @@ class FacebookBackend:
                 m = re.search(r"\(([0-9]{8,}|Uzpf[A-Za-z0-9_-]{8,})\)", msg)
             if m:
                 post_id = m.group(1)
-            # post_id trùng group_id hoặc đã dùng cho nhóm khác → giả
             if post_id and (
                 str(post_id) == str(group_id) or str(post_id) in self._used_post_ids
             ):
                 _prog(f"{name}: post_id trùng/đã dùng ({str(post_id)[:20]}) → bỏ qua")
-                last_err = f"{name} trả post_id cũ — có thể FB chặn spam hoặc echo bài trước"
+                last_err = f"{name} trả post_id cũ — FB có thể chặn spam"
                 continue
 
             verified = None
             try:
                 verified = self._verify_post_status(
-                    group_id, message, post_id=post_id, claimed=status
+                    group_id,
+                    message,
+                    post_id=post_id,
+                    claimed=status,
+                    marker=marker,
                 )
             except Exception as exc:
                 _prog(f"Xác minh lỗi: {exc}")
@@ -808,10 +829,15 @@ class FacebookBackend:
             if verified in ("published", "pending"):
                 if post_id:
                     self._used_post_ids.add(str(post_id))
-                label = "Đã đăng lên nhóm" if verified == "published" else "Đang chờ admin duyệt"
-                extra = " (đã xác minh)"
+                self._used_post_ids.add(f"marker:{marker}")
+                label = (
+                    "Đã đăng lên nhóm"
+                    if verified == "published"
+                    else "Đang chờ admin duyệt"
+                )
+                extra = f" (#{marker}, đã xác minh)"
                 if post_id:
-                    extra = f" (post: {post_id[:28]}, đã xác minh)"
+                    extra = f" (post: {post_id[:24]}, #{marker})"
                 _prog(f"{name}: {label}{extra}")
                 try:
                     self.save_tokens()
@@ -819,29 +845,63 @@ class FacebookBackend:
                     pass
                 return verified, f"{label}{extra}"
 
-            # Báo success nhưng không thấy bài → coi là thất bại, thử cách khác
             last_err = (
-                f"{name} báo OK nhưng không thấy bài trên nhóm/hàng chờ"
+                f"{name} báo OK nhưng KHÔNG thấy mã #{marker} trên nhóm/hàng chờ"
                 + (f" — {msg}" if msg else "")
             )
             _prog(f"⚠ {last_err}")
 
         return "failed", last_err
 
+    @staticmethod
+    def _extract_verify_marker(message: str) -> str | None:
+        m = re.search(r"(?m)^#([a-f0-9]{6})\s*$", message or "")
+        if m:
+            return m.group(1).lower()
+        m = re.search(r"#([a-f0-9]{6})\b", message or "")
+        return m.group(1).lower() if m else None
+
+    def _marker_visible_on_group(self, group_id: str, marker: str) -> bool:
+        """True nếu đã thấy #marker trên feed/pending của đúng nhóm."""
+        if not marker:
+            return False
+        needle = f"#{marker.lower()}"
+        self._use_desktop_session()
+        urls = [
+            f"https://mbasic.facebook.com/groups/{group_id}/pending",
+            f"https://mbasic.facebook.com/groups/{group_id}",
+            f"https://m.facebook.com/groups/{group_id}/pending",
+            f"https://m.facebook.com/groups/{group_id}",
+        ]
+        for url in urls:
+            try:
+                resp = self.session.get(url, timeout=12, allow_redirects=True)
+                if resp.status_code >= 400:
+                    continue
+                final = resp.url.lower()
+                if "login" in final:
+                    continue
+                if f"/groups/{group_id}" not in final and f"groups/{group_id}" not in resp.text:
+                    continue
+                if needle in resp.text.lower():
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _message_snippets(self, message: str) -> list[str]:
-        """Đoạn text dùng để khớp bài trên feed/pending."""
+        """Đoạn text dùng để khớp bài — ưu tiên mã #xxxxxx."""
         raw = message or ""
-        snippet = re.sub(r"\s+", " ", raw.strip())
         checks: list[str] = []
-        # Ưu tiên đuôi bài (chứa dấu ẩn unique từng nhóm)
-        if len(raw) >= 24:
-            checks.append(raw[-96:].lower())
-        if len(snippet) >= 10:
-            checks.append(snippet[:48].lower())
+        marker = self._extract_verify_marker(raw)
+        if marker:
+            checks.append(f"#{marker}")
         for line in raw.split("\n"):
             line = re.sub(r"\s+", " ", line).strip()
-            if len(line) >= 10 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
-                checks.append(line[:40].lower())
+            if line.startswith("#") and len(line) <= 12:
+                continue
+            if len(line) >= 16 and re.search(r"[a-zA-ZÀ-ỹ0-9]", line):
+                checks.append(line[:48].lower())
                 break
         return list(dict.fromkeys(c for c in checks if c))
 
@@ -851,22 +911,25 @@ class FacebookBackend:
         message: str,
         post_id: str | None = None,
         claimed: str | None = None,
+        marker: str | None = None,
     ) -> str | None:
         """
-        Xác minh bài đã lên feed hoặc hàng chờ.
-        Returns: published | pending | None
+        Chỉ OK khi thấy mã #marker trên đúng nhóm (pending hoặc feed).
+        Không bao giờ tin post_id một mình.
         """
-        checks = self._message_snippets(message)
+        marker = (marker or self._extract_verify_marker(message) or "").lower()
+        if not marker:
+            return None
         self._use_desktop_session()
 
-        # Thử vài lần — FB đôi khi chậm index
-        for attempt in range(3):
+        for attempt in range(4):
             if attempt:
-                time.sleep(1.8)
+                time.sleep(2.0)
             else:
-                time.sleep(1.0)
-
-            found = self._verify_once(group_id, checks, post_id=post_id, claimed=claimed)
+                time.sleep(1.2)
+            found = self._verify_once(
+                group_id, marker=marker, post_id=post_id, claimed=claimed
+            )
             if found:
                 return found
         return None
@@ -874,32 +937,26 @@ class FacebookBackend:
     def _verify_once(
         self,
         group_id: str,
-        checks: list[str],
+        marker: str,
         post_id: str | None = None,
         claimed: str | None = None,
     ) -> str | None:
-        urls: list[tuple[str, str]] = []
-        if post_id:
-            pid = str(post_id)
-            if pid.isdigit():
-                urls.extend([
-                    ("by_id", f"https://www.facebook.com/groups/{group_id}/posts/{pid}"),
-                    ("by_id", f"https://www.facebook.com/groups/{group_id}/permalink/{pid}/"),
-                    ("by_id", f"https://mbasic.facebook.com/story.php?story_fbid={pid}&id={group_id}"),
-                    ("by_id", f"https://m.facebook.com/story.php?story_fbid={pid}&id={group_id}"),
-                ])
-            else:
-                urls.append(("by_id", f"https://www.facebook.com/{pid}"))
-
-        urls.extend([
-            ("pending", f"https://mbasic.facebook.com/groups/{group_id}/pending"),
-            ("pending", f"https://m.facebook.com/groups/{group_id}/pending"),
-            ("pending", f"https://www.facebook.com/groups/{group_id}/pending_posts"),
-            ("pending", f"https://www.facebook.com/groups/{group_id}/pending"),
-            ("feed", f"https://mbasic.facebook.com/groups/{group_id}"),
-            ("feed", f"https://m.facebook.com/groups/{group_id}"),
-            ("feed", f"https://www.facebook.com/groups/{group_id}"),
-        ])
+        needle = f"#{marker.lower()}"
+        gid = str(group_id)
+        urls: list[tuple[str, str]] = [
+            ("pending", f"https://mbasic.facebook.com/groups/{gid}/pending"),
+            ("pending", f"https://m.facebook.com/groups/{gid}/pending"),
+            ("feed", f"https://mbasic.facebook.com/groups/{gid}"),
+            ("feed", f"https://m.facebook.com/groups/{gid}"),
+            ("pending", f"https://www.facebook.com/groups/{gid}/pending_posts"),
+            ("feed", f"https://www.facebook.com/groups/{gid}"),
+        ]
+        if post_id and str(post_id).isdigit():
+            urls[0:0] = [
+                ("by_id", f"https://mbasic.facebook.com/story.php?story_fbid={post_id}&id={gid}"),
+                ("by_id", f"https://m.facebook.com/story.php?story_fbid={post_id}&id={gid}"),
+                ("by_id", f"https://www.facebook.com/groups/{gid}/posts/{post_id}"),
+            ]
 
         for kind, url in urls:
             try:
@@ -909,60 +966,37 @@ class FacebookBackend:
                 html = resp.text
                 low = html.lower()
                 final = resp.url.lower()
-                gid = str(group_id)
 
-                if "login" in final or "/login" in final:
+                if "login" in final:
                     continue
-                if any(x in low[:2500] for x in (
-                    "content isn't available", "nội dung không",
-                    "this content isn't available", "không khả dụng",
-                )):
+                if any(
+                    x in low[:2500]
+                    for x in (
+                        "content isn't available",
+                        "nội dung không",
+                        "this content isn't available",
+                        "không khả dụng",
+                    )
+                ):
                     continue
 
-                # Bắt buộc vẫn thuộc đúng nhóm (tránh redirect sang bài nhóm trước)
                 on_this_group = (
                     f"/groups/{gid}" in final
                     or f"id={gid}" in final
-                    or f"&id={gid}" in final
-                    or f"group_id={gid}" in final
                 )
-                if kind in ("by_id", "pending", "feed") and not on_this_group:
-                    # URL tuyệt đối /Uzpf... đôi khi không có group trong path —
-                    # chỉ chấp nhận nếu HTML chứa groups/{gid}
-                    if f"/groups/{gid}" not in low and f"groups\\/{gid}" not in low:
-                        continue
-
-                has_pid = bool(post_id and str(post_id) in html)
-                matched = any(c in low for c in checks) if checks else False
-
-                if kind == "by_id":
-                    # Phải khớp nội dung HOẶC (pid + đúng nhóm) — không tin redirect mù
-                    if not on_this_group and f"/groups/{gid}" not in low:
-                        continue
-                    if has_pid and matched:
-                        if "pending" in final or "pending" in low[:3000] or claimed == "pending":
-                            return "pending"
-                        return "published"
-                    if has_pid and on_this_group:
-                        # Có post_id trên URL nhóm này; ưu tiên pending nếu claim
-                        if claimed == "pending" or "pending" in final or "pending" in low[:3000]:
-                            return "pending"
-                        return "published"
-                    if matched and on_this_group:
-                        if claimed == "pending" or "pending" in low[:3000]:
-                            return "pending"
-                        return "published"
+                if not on_this_group:
                     continue
 
-                # feed / pending: bắt buộc khớp nội dung bài (không chỉ banner chờ duyệt)
-                if not matched:
+                # BẮT BUỘC thấy mã xác minh riêng của lần đăng này
+                if needle not in low:
                     continue
 
-                if kind == "pending":
+                if kind == "pending" or "pending" in final:
                     return "pending"
-
-                if "pending" in final:
+                if claimed == "pending":
                     return "pending"
+                if kind == "by_id" and post_id and str(post_id) in html:
+                    return "pending" if "pending" in low[:4000] else "published"
                 return "published"
             except Exception:
                 continue
@@ -2721,7 +2755,7 @@ class App(tk.Tk):
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(
             left,
-            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  —  chỉ báo OK khi có post ID",
+            text="✅ Đã đăng   ⏳ Chờ duyệt   ❌ Lỗi  — mỗi nhóm gắn mã #xxxxxx để xác minh thật",
             bg=COLOR_PANEL, fg=COLOR_ACCENT2, font=("Segoe UI", 10),
         ).pack(anchor="w", pady=(4, 12))
 
@@ -2878,15 +2912,16 @@ class App(tk.Tk):
             self._persist_draft()
             self._log(f"Đã lưu ảnh: {cached}", "ok")
 
-    def _unique_message(self, message: str, group_id: str) -> str:
+    def _unique_message(self, message: str, group_id: str, index: int = 1) -> str:
         """
-        Thêm dấu ẩn (zero-width) riêng mỗi nhóm.
-        Giúp tránh FB coi là spam trùng + tránh xác minh nhầm bài nhóm trước.
+        Gắn mã #xxxxxx riêng mỗi nhóm (hiển thị được).
+        Dùng để xác minh thật + giảm FB chặn bài trùng.
         """
-        seed = f"{group_id}-{uuid.uuid4().hex[:8]}"
-        bits = "".join(f"{ord(c):08b}" for c in seed[:10])
-        zw = "".join("\u200b" if b == "0" else "\u200c" for b in bits)
-        return message.rstrip() + zw
+        # Bỏ marker cũ nếu có
+        base = re.sub(r"(?m)\n*#[a-f0-9]{6}\s*$", "", message or "").rstrip()
+        code = uuid.uuid4().hex[:6]
+        # Thêm biến thể nhẹ theo thứ tự nhóm
+        return f"{base}\n\n#{code}"
 
     def _get_selected_groups(self) -> list[dict]:
         return [g for var, g in self._group_vars if var.get()]
@@ -2953,7 +2988,8 @@ class App(tk.Tk):
         self._tick_timer()
 
         self._live(f"▶ Bắt đầu đăng vào {len(groups)} nhóm (delay {delay}s)", "bold")
-        self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi — mỗi nhóm dùng post_id riêng", "info")
+        self._live("Mỗi nhóm có mã #xxxxxx — chỉ báo OK khi thấy mã trên đúng nhóm", "info")
+        self._live("✅ Đã đăng | ⏳ Chờ duyệt | ❌ Lỗi", "info")
 
         def _worker():
             ok_count = 0
@@ -2968,8 +3004,8 @@ class App(tk.Tk):
                 gname = g.get("name", gid)
                 n = idx + 1
                 t = len(groups)
-                # Nội dung có dấu ẩn riêng từng nhóm
-                msg_for_group = self._unique_message(message, gid)
+                msg_for_group = self._unique_message(message, gid, index=n)
+                marker = self.backend._extract_verify_marker(msg_for_group) or "?"
 
                 def _prog(msg, _n=n, _t=t, _name=gname, _gid=gid):
                     self.after(
@@ -2979,8 +3015,21 @@ class App(tk.Tk):
 
                 self.after(
                     0,
-                    lambda: self._live(f"[{n}/{t}] Đang xử lý: {gname} [{gid}]…", "info"),
+                    lambda: self._live(
+                        f"[{n}/{t}] Đang xử lý: {gname} [{gid}] (mã #{marker})…", "info"
+                    ),
                 )
+
+                # Làm ấm session trên đúng trang nhóm trước khi đăng
+                try:
+                    self.backend._use_desktop_session()
+                    self.backend.session.get(
+                        f"https://www.facebook.com/groups/{gid}",
+                        timeout=12,
+                    )
+                    time.sleep(1.5)
+                except Exception:
+                    pass
 
                 try:
                     status, msg_result = self.backend.post_to_group(
@@ -3011,8 +3060,10 @@ class App(tk.Tk):
                 )
 
                 if idx < len(groups) - 1 and not self._stop_flag:
-                    # Delay tăng dần nhẹ sau mỗi nhóm để giảm spam block
-                    wait_s = int(delay) + min(idx * 2, 20)
+                    # Delay tăng sau mỗi nhóm; thêm buffer nếu vừa lỗi (có thể bị rate-limit)
+                    wait_s = int(delay) + min(idx * 3, 30)
+                    if status == "failed":
+                        wait_s += 15
                     for sec in range(wait_s):
                         if self._stop_flag:
                             break
