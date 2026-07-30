@@ -100,13 +100,13 @@ public class MailOtpService {
                     MÃ TOKEN:
                     %s
 
+                    Token của bạn sẽ được lưu trong đơn hàng trên website.
+
                     Hướng dẫn chạy tool:
                     1. Mở Facebook Group Poster trên máy của bạn
                     2. Dán token vào ô kích hoạt License
                     3. Mỗi token chỉ dùng được 1 máy
                     4. Xem lại token tại: %s/account/orders
-
-                    Lịch sử mua hàng: %s/account/orders
 
                     Hỗ trợ Zalo/SĐT: 0981227703
                     © Bản quyền thuộc về TranDinhHung
