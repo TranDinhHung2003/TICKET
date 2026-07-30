@@ -211,7 +211,7 @@ public class AdminController {
   @PostMapping("/tokens/{token}/reset")
   public String reset(@PathVariable String token, RedirectAttributes ra) {
     licenseService.resetMachine(token);
-    ra.addFlashAttribute("success", "Đã reset máy gắn token");
+    ra.addFlashAttribute("success", "Đã cho phép đổi máy (máy cũ bị chặn)");
     return "redirect:/admin/tokens";
   }
 

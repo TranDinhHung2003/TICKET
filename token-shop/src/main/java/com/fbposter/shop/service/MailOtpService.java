@@ -37,19 +37,38 @@ public class MailOtpService {
         otp.setExpiresAt(Instant.now().plus(props.getOtpExpireMinutes(), ChronoUnit.MINUTES));
         otpRepo.save(otp);
 
+        String subject;
+        String body;
+        if ("REGISTER".equalsIgnoreCase(purpose)) {
+            subject = "[" + props.getName() + "] Mã OTP đăng ký tài khoản";
+            body = "Xin chào,\n\n"
+                    + "Bạn đang đăng ký tài khoản trên " + props.getName() + ".\n"
+                    + "Mã OTP xác minh Gmail của bạn là:\n\n"
+                    + "    " + code + "\n\n"
+                    + "Mã có hiệu lực " + props.getOtpExpireMinutes() + " phút.\n"
+                    + "Không chia sẻ mã này cho người khác.\n\n"
+                    + "Nếu bạn không yêu cầu đăng ký, hãy bỏ qua email này.\n\n"
+                    + "— " + props.getName() + "\n"
+                    + "Bản quyền thuộc về TranDinhHung\n"
+                    + "Zalo/SĐT hỗ trợ: 0981227703\n";
+        } else {
+            subject = "[" + props.getName() + "] Mã OTP xác minh";
+            body = "Mã OTP của bạn: " + code + "\nHiệu lực " + props.getOtpExpireMinutes()
+                    + " phút.\nKhông chia sẻ mã này.";
+        }
+
         try {
             SimpleMailMessage msg = new SimpleMailMessage();
             msg.setFrom(props.getMailFrom());
             msg.setTo(email);
-            msg.setSubject("[" + props.getName() + "] Mã OTP xác minh");
-            msg.setText("Mã OTP của bạn: " + code + "\nHiệu lực " + props.getOtpExpireMinutes()
-                    + " phút.\nKhông chia sẻ mã này.");
+            msg.setSubject(subject);
+            msg.setText(body);
             mailSender.send(msg);
         } catch (Exception ex) {
-            // Dev mode: vẫn lưu OTP, log ra console
+            // Dev mode: vẫn lưu OTP, log ra console khi chưa cấu hình SMTP
             System.out.println("[DEV OTP] " + email + " / " + purpose + " = " + code + " (" + ex.getMessage() + ")");
         }
-        return code; // chỉ dùng khi debug; production không trả về controller
+        return code;
     }
 
     @Transactional
@@ -87,8 +106,11 @@ public class MailOtpService {
                     3. Mỗi token chỉ dùng được 1 máy
                     4. Xem lại token tại: %s/account/orders
 
-                    Ghi chú hệ thống (ước tính): %s
-                    """.formatted(planName, duration, token, props.getBaseUrl(), expiresAt));
+                    Lịch sử mua hàng: %s/account/orders
+
+                    Hỗ trợ Zalo/SĐT: 0981227703
+                    © Bản quyền thuộc về TranDinhHung
+                    """.formatted(planName, duration, token, props.getBaseUrl()));
             mailSender.send(msg);
         } catch (Exception ex) {
             System.out.println("[DEV MAIL TOKEN] to=" + to + " token=" + token + " err=" + ex.getMessage());

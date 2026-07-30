@@ -59,7 +59,7 @@ public class AuthController {
     try {
       authService.startRegister(email, fullName, password);
       session.setAttribute("pendingEmail", email.trim().toLowerCase());
-      ra.addFlashAttribute("success", "Đã gửi mã OTP tới email. Vui lòng nhập mã để hoàn tất.");
+      ra.addFlashAttribute("success", "Đã gửi mã OTP về Gmail của bạn. Vui lòng nhập mã để hoàn tất đăng ký.");
       return "redirect:/register/verify";
     } catch (IllegalArgumentException ex) {
       ra.addFlashAttribute("error", ex.getMessage());
@@ -96,7 +96,7 @@ public class AuthController {
     try {
       authService.resendRegisterOtp(email);
       session.setAttribute("pendingEmail", email.trim().toLowerCase());
-      ra.addFlashAttribute("success", "Đã gửi lại mã OTP");
+      ra.addFlashAttribute("success", "Đã gửi lại mã OTP về Gmail");
     } catch (IllegalArgumentException ex) {
       ra.addFlashAttribute("error", ex.getMessage());
     }

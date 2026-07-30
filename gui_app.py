@@ -29,7 +29,10 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_TITLE = "Facebook Group Poster"
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
+APP_COPYRIGHT = "© Bản quyền thuộc về TranDinhHung"
+APP_SUPPORT_ZALO = "0981227703"
+APP_SUPPORT_PHONE = "0981227703"
 MOBILE_URL = "https://mbasic.facebook.com"
 
 # Thư mục dữ liệu cục bộ — mở lại tool giữ cookies / nhóm / bài nháp
@@ -2643,7 +2646,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         _ensure_data_dir()
-        self.title(f"{APP_TITLE} v{APP_VERSION}")
+        self.title(f"{APP_TITLE} v{APP_VERSION} — {APP_COPYRIGHT}")
         self.geometry("1120x760")
         self.minsize(960, 660)
         self.configure(bg=COLOR_BG)
@@ -2780,14 +2783,16 @@ class App(tk.Tk):
 
         title = "🔑  Nhập mã token để sử dụng app"
         hint = (
-            "Mua token trên trang web / liên hệ admin.\n"
-            "Mỗi token chỉ kích hoạt được 1 máy."
+            "Mua token trên trang web / Zalo 0981227703.\n"
+            "Mỗi token chỉ kích hoạt được 1 máy.\n"
+            f"{APP_COPYRIGHT}"
         )
         if reason == "expired":
             title = "⏰  Token đã hết hạn"
             hint = (
                 "Bạn cần mua token để sử dụng tiếp.\n"
-                "Liên hệ admin / mở trang mua token để nhận mã mới."
+                "Zalo / SĐT: 0981227703\n"
+                f"{APP_COPYRIGHT}"
             )
 
         tk.Label(
@@ -3082,6 +3087,13 @@ class App(tk.Tk):
                  font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Label(logo_frame, text=f"  v{APP_VERSION}", bg=COLOR_HEADER, fg="#FFEDD5",
                  font=("Segoe UI", 9)).pack(side="left", pady=(6, 0))
+        tk.Label(
+            logo_frame,
+            text=f"  ·  {APP_COPYRIGHT}",
+            bg=COLOR_HEADER,
+            fg="#FED7AA",
+            font=("Segoe UI", 8),
+        ).pack(side="left", pady=(8, 0))
 
         status_frame = tk.Frame(header, bg="#C2410C", padx=16, pady=8)
         status_frame.pack(side="right", padx=20, pady=14)
@@ -3109,7 +3121,7 @@ class App(tk.Tk):
         )
 
         content = tk.Frame(self, bg=COLOR_BG)
-        content.pack(fill="both", expand=True, padx=12, pady=(8, 12))
+        content.pack(fill="both", expand=True, padx=12, pady=(8, 4))
 
         nb = ttk.Notebook(content, style="Custom.TNotebook")
         nb.pack(fill="both", expand=True)
@@ -3132,6 +3144,16 @@ class App(tk.Tk):
         self._build_post_tab()
         self._build_log_tab()
         self._build_settings_tab()
+
+        foot = tk.Frame(self, bg=COLOR_BG)
+        foot.pack(fill="x", side="bottom", padx=12, pady=(0, 8))
+        tk.Label(
+            foot,
+            text=f"{APP_COPYRIGHT}  ·  Hỗ trợ Zalo/SĐT: {APP_SUPPORT_ZALO}",
+            bg=COLOR_BG,
+            fg=COLOR_TEXT_DIM,
+            font=("Segoe UI", 8),
+        ).pack(anchor="e")
 
         if self.backend.logged_in:
             self._on_login_success_ui()

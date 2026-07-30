@@ -10,7 +10,8 @@
   <link rel="stylesheet" th:href="@{/css/shop.css}"/>
 </head>
 <body>
-<header class="topbar" th:fragment="topbar">
+<th:block th:fragment="topbar">
+<header class="topbar">
   <a class="brand" th:href="@{/}">FB Poster</a>
   <nav>
     <a th:href="@{/}">Mua token</a>
@@ -23,6 +24,18 @@
     </form>
   </nav>
 </header>
+<div class="contact-dock">
+  <a class="contact-btn zalo" href="https://zalo.me/0981227703" target="_blank" rel="noopener"
+     title="Zalo 0981227703">
+    <span class="contact-label">Zalo</span>
+    <span class="contact-num">0981227703</span>
+  </a>
+  <a class="contact-btn phone" href="tel:0981227703" title="Gọi 0981227703">
+    <span class="contact-label">Gọi</span>
+    <span class="contact-num">0981227703</span>
+  </a>
+</div>
+</th:block>
 
 <aside class="admin-nav" th:fragment="admin-nav(active)">
   <div class="title">Admin</div>
@@ -37,7 +50,8 @@
 </aside>
 
 <footer class="site-footer" th:fragment="footer">
-  <p>Facebook Group Poster · Token Shop · Thanh toán SePay</p>
+  <p>Facebook Group Poster · Token Shop · Thanh toán SePay MB Bank</p>
+  <p class="copyright">© Bản quyền thuộc về <strong>TranDinhHung</strong>. Mọi quyền được bảo lưu.</p>
 </footer>
 </body>
 </html>

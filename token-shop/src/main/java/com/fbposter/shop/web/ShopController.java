@@ -61,7 +61,8 @@ public class ShopController {
         Map.of(
             "status", order.getStatus().name(),
             "paid", order.getStatus() == OrderStatus.PAID,
-            "token", order.getIssuedToken() == null ? "" : order.getIssuedToken()));
+            "token", order.getIssuedToken() == null ? "" : order.getIssuedToken(),
+            "durationLabel", order.getPlan().durationLabel()));
   }
 
   @GetMapping("/account/orders")
