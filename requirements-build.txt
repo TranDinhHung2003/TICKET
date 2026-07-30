@@ -1,0 +1,8 @@
+# Dependencies chỉ dùng khi build EXE / bản bảo vệ
+pyinstaller>=6.0
+pycryptodomex>=3.20.0
+# Tuỳ chọn — bảo vệ mạnh hơn:
+# nuitka
+# ordered-set
+# zstandard
+# pyarmor  (bản trả phí nếu script lớn)

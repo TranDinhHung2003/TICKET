@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Log mua bán — Admin')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="admin-layout">
+  <div th:replace="~{fragments :: admin-nav('sales')}"></div>
+  <div class="panel table-wrap">
+    <h2 style="font-family:var(--display);margin-top:0">Log mua bán</h2>
+    <p class="muted">Từ thông tin người mua đến thời hạn token.</p>
+    <table>
+      <thead>
+      <tr>
+        <th>ID</th><th>Thời gian</th><th>Người mua</th><th>User ID</th>
+        <th>Đơn / mã CK</th><th>Gói</th><th>Thời hạn</th><th>Hết hạn</th>
+        <th>Số tiền</th><th>Token</th><th>Ghi chú</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr th:each="s : ${logs}">
+        <td th:text="${s.id}"></td>
+        <td th:text="${s.createdAt}"></td>
+        <td>
+          <div th:text="${s.buyerName}"></div>
+          <div class="mono muted" th:text="${s.buyerEmail}"></div>
+        </td>
+        <td th:text="${s.userId}"></td>
+        <td>
+          <div th:text="${'#' + s.orderId}"></div>
+          <div class="mono" th:text="${s.paymentCode}"></div>
+        </td>
+        <td th:text="${s.planName}"></td>
+        <td th:text="${s.durationLabel}"></td>
+        <td th:text="${s.tokenExpiresAt}"></td>
+        <td class="mono" th:text="${#numbers.formatInteger(s.amountVnd, 0, 'COMMA')}"></td>
+        <td class="mono" th:text="${s.issuedToken}"></td>
+        <td th:text="${s.note}"></td>
+      </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

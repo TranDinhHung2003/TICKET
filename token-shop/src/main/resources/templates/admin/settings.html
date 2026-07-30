@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Cấu hình — Admin')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="admin-layout">
+  <div th:replace="~{fragments :: admin-nav('settings')}"></div>
+  <div class="panel">
+    <h2 style="font-family:var(--display);margin-top:0">Cấu hình (env)</h2>
+    <p class="muted">Chỉnh qua biến môi trường / application.yml rồi restart.</p>
+    <table>
+      <tr><th>App</th><td th:text="${props.name}"></td></tr>
+      <tr><th>Base URL</th><td class="mono" th:text="${props.baseUrl}"></td></tr>
+      <tr><th>Admin email</th><td class="mono" th:text="${props.adminEmail}"></td></tr>
+      <tr><th>Ngân hàng</th><td>MB Bank (<span th:text="${props.sepay.bankCode}"></span>)</td></tr>
+      <tr><th>STK nhận</th><td class="mono" th:text="${props.sepay.accountNumber}"></td></tr>
+      <tr><th>Chủ TK</th><td th:text="${props.sepay.accountName}"></td></tr>
+      <tr><th>Prefix mã CK</th><td class="mono" th:text="${props.sepay.paymentPrefix}"></td></tr>
+      <tr><th>Webhook</th><td class="mono" th:text="${props.baseUrl + '/api/sepay/webhook'}"></td></tr>
+      <tr><th>License API</th><td class="mono" th:text="${props.baseUrl + '/api/v1/activate|verify'}"></td></tr>
+    </table>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

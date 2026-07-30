@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Token — Admin')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="admin-layout">
+  <div th:replace="~{fragments :: admin-nav('tokens')}"></div>
+  <div>
+    <div th:if="${success}" class="alert alert-ok" th:text="${success}"></div>
+    <div class="panel" style="margin-bottom:1rem">
+      <h2 style="font-family:var(--display);margin-top:0">Cấp token thủ công</h2>
+      <form th:action="@{/admin/tokens}" method="post" class="stack-form">
+        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+        <div class="row2">
+          <div class="field">
+            <label>User (tuỳ chọn)</label>
+            <select name="userId">
+              <option value="">—</option>
+              <option th:each="u : ${users}" th:value="${u.id}" th:text="${u.email}"></option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Gói thời hạn</label>
+            <select name="planId">
+              <option value="">30 ngày mặc định</option>
+              <option th:each="p : ${plans}" th:value="${p.id}" th:text="${p.name + ' (' + p.durationLabel() + ')'}"></option>
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>Ghi chú</label><input name="note"/></div>
+        <button class="btn btn-primary" type="submit">Tạo token</button>
+      </form>
+    </div>
+    <div class="panel table-wrap">
+      <h3 style="margin-top:0">Quản lý token — Thu hồi / Cho đổi máy</h3>
+      <p class="muted">Thu hồi: khoá token. Cho đổi máy: gỡ máy cũ để khách kích hoạt máy mới.</p>
+      <table>
+        <thead>
+        <tr>
+          <th>Token</th><th>Owner</th><th>Thời hạn gói</th><th>Máy</th><th>IP</th><th>Revoked</th><th>Thao tác</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr th:each="t : ${tokens}">
+          <td class="mono" th:text="${t.token}"></td>
+          <td th:text="${t.owner != null ? t.owner.email : '—'}"></td>
+          <td>
+            <div th:text="${t.durationLabel}"></div>
+            <div class="muted" th:text="${t.durationMinutes + ' phút'}"></div>
+            <div class="muted" th:text="${t.expiresAt}"></div>
+          </td>
+          <td class="mono" th:text="${t.machineId != null ? t.machineId : 'Chưa gắn'}"></td>
+          <td class="mono" th:text="${t.lastIp}"></td>
+          <td th:text="${t.revoked ? 'Đã thu hồi' : 'Đang dùng'}"></td>
+          <td>
+            <form th:action="@{/admin/tokens/{token}/reset(token=${t.token})}" method="post" style="display:inline"
+                  onsubmit="return confirm('Cho phép đổi máy? Máy cũ sẽ bị chặn, khách kích hoạt máy mới.');">
+              <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+              <button class="btn btn-sm btn-ghost" type="submit">Cho đổi máy</button>
+            </form>
+            <form th:action="@{/admin/tokens/{token}/revoke(token=${t.token})}" method="post" style="display:inline"
+                  onsubmit="return confirm('Thu hồi token này? Khách sẽ không dùng được nữa.');">
+              <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+              <button class="btn btn-sm btn-danger" type="submit">Thu hồi</button>
+            </form>
+          </td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

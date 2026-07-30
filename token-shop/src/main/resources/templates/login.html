@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Đăng nhập — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="auth-wrap">
+  <div class="panel">
+    <h1>Đăng nhập</h1>
+    <p class="muted">Vào tài khoản để mua token và xem lịch sử.</p>
+    <div th:if="${param.error}" class="alert alert-error">Email/mật khẩu sai hoặc chưa xác minh OTP.</div>
+    <div th:if="${param.oauth_error}" class="alert alert-error">Đăng nhập Google thất bại.</div>
+    <div th:if="${param.logout}" class="alert alert-ok">Đã đăng xuất.</div>
+
+    <form th:action="@{/login}" method="post" class="stack-form">
+      <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+      <div class="field">
+        <label>Email</label>
+        <input type="email" name="email" required autocomplete="username"/>
+      </div>
+      <div class="field">
+        <label>Mật khẩu</label>
+        <input type="password" name="password" required autocomplete="current-password"/>
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:100%">Đăng nhập</button>
+    </form>
+
+    <div th:if="${googleEnabled}">
+      <div class="divider">hoặc</div>
+      <a class="google-btn" th:href="@{/oauth2/authorization/google}">Đăng nhập nhanh bằng Google</a>
+    </div>
+
+    <p style="margin-top:1.2rem" class="muted">Chưa có tài khoản? <a th:href="@{/register}">Đăng ký email + OTP</a></p>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

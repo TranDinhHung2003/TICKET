@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Admin — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="admin-layout">
+  <div th:replace="~{fragments :: admin-nav('dash')}"></div>
+  <div>
+    <h2 style="font-family:var(--display);margin-top:0">Tổng quan</h2>
+    <div class="stats">
+      <div class="stat"><div class="n" th:text="${saleCount}">0</div><div class="l">Log bán</div></div>
+      <div class="stat"><div class="n" th:text="${orderCount}">0</div><div class="l">Đơn hàng</div></div>
+      <div class="stat"><div class="n" th:text="${userCount}">0</div><div class="l">Tài khoản</div></div>
+      <div class="stat"><div class="n" th:text="${tokenCount}">0</div><div class="l">Token</div></div>
+    </div>
+    <div class="panel table-wrap">
+      <h3>Bán gần đây</h3>
+      <table>
+        <thead>
+        <tr><th>Thời gian</th><th>Người mua</th><th>Gói / hạn</th><th>Tiền</th><th>Token</th></tr>
+        </thead>
+        <tbody>
+        <tr th:each="s : ${recentSales}">
+          <td th:text="${s.createdAt}"></td>
+          <td>
+            <div th:text="${s.buyerName}"></div>
+            <div class="muted mono" th:text="${s.buyerEmail}"></div>
+          </td>
+          <td>
+            <div th:text="${s.planName}"></div>
+            <div class="muted" th:text="${s.durationLabel}"></div>
+            <div class="muted" th:text="${'Hết hạn: ' + s.tokenExpiresAt}"></div>
+          </td>
+          <td class="mono" th:text="${#numbers.formatInteger(s.amountVnd, 0, 'COMMA') + '₫'}"></td>
+          <td class="mono" th:text="${s.issuedToken}"></td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

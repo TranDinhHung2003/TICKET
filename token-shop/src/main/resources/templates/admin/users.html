@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Tài khoản — Admin')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="admin-layout">
+  <div th:replace="~{fragments :: admin-nav('users')}"></div>
+  <div>
+    <div th:if="${success}" class="alert alert-ok" th:text="${success}"></div>
+    <div th:if="${error}" class="alert alert-error" th:text="${error}"></div>
+    <div class="panel" style="margin-bottom:1rem">
+      <h2 style="font-family:var(--display);margin-top:0">Tạo tài khoản</h2>
+      <form th:action="@{/admin/users}" method="post" class="stack-form">
+        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+        <div class="row2">
+          <div class="field"><label>Email</label><input type="email" name="email" required/></div>
+          <div class="field"><label>Họ tên</label><input name="fullName" required/></div>
+          <div class="field"><label>Mật khẩu</label><input type="password" name="password" required minlength="6"/></div>
+          <div class="field">
+            <label>Vai trò</label>
+            <select name="role"><option>USER</option><option>ADMIN</option></select>
+          </div>
+        </div>
+        <button class="btn btn-primary" type="submit">Tạo</button>
+      </form>
+    </div>
+    <div class="panel table-wrap">
+      <table>
+        <thead>
+        <tr><th>ID</th><th>Email</th><th>Tên</th><th>Role</th><th>OTP/Google</th><th>Enabled</th><th></th></tr>
+        </thead>
+        <tbody>
+        <tr th:each="u : ${users}">
+          <td th:text="${u.id}"></td>
+          <td class="mono" th:text="${u.email}"></td>
+          <td th:text="${u.fullName}"></td>
+          <td th:text="${u.role}"></td>
+          <td>
+            <span th:text="${u.emailVerified ? 'Verified' : 'Chưa OTP'}"></span>
+            <span th:if="${u.googleId != null}" class="muted"> · Google</span>
+          </td>
+          <td th:text="${u.enabled}"></td>
+          <td>
+            <form th:action="@{/admin/users/{id}/toggle(id=${u.id})}" method="post">
+              <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+              <button class="btn btn-sm btn-ghost" type="submit">Bật/Tắt</button>
+            </form>
+          </td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

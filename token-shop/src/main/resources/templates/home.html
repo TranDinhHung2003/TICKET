@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Mua token — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+
+<section class="hero">
+  <div class="hero-kicker">Bán hàng tự động · MB Bank · SePay</div>
+  <h1>FB Poster</h1>
+  <p class="lead">Chọn thời hạn → chuyển khoản MB Bank → hệ thống tự tạo token đúng gói và gửi về Gmail. Dùng token để chạy tool ngay.</p>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="#plans">Chọn thời hạn &amp; mua</a>
+    <a class="btn btn-ghost" href="#huong-dan">Hướng dẫn chạy tool</a>
+  </div>
+</section>
+
+<section class="section" id="plans">
+  <h2>Chọn thời hạn token</h2>
+  <p class="sub">Thời gian bạn chọn = thời hạn token (tính từ lúc kích hoạt trên máy). Thanh toán xong là nhận token tự động.</p>
+
+  <div th:if="${error}" class="alert alert-error" th:text="${error}"></div>
+
+  <div class="plan-grid">
+    <article class="plan" th:each="p : ${plans}">
+      <h3 th:text="${p.name}">Gói</h3>
+      <div class="dur" th:text="${'Thời hạn: ' + p.durationLabel()}">Thời hạn</div>
+      <div class="price" th:text="${#numbers.formatInteger(p.priceVnd, 0, 'COMMA') + '₫'}">0₫</div>
+      <p class="desc" th:text="${p.description}">Mô tả</p>
+      <form th:action="@{/buy/{id}(id=${p.id})}" method="post">
+        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+        <button class="btn btn-dark" type="submit">Mua gói này</button>
+      </form>
+    </article>
+  </div>
+</section>
+
+<section class="section" id="huong-dan">
+  <h2>Hướng dẫn chạy tool</h2>
+  <p class="sub">Sau khi mua, làm theo các bước sau để dùng Facebook Group Poster.</p>
+  <div class="plan-grid">
+    <article class="plan">
+      <h3>1. Thanh toán</h3>
+      <p class="desc">Đăng nhập → chọn gói thời hạn → quét VietQR MB Bank hoặc chuyển khoản đúng nội dung <span class="mono">FBPAY…</span>.</p>
+    </article>
+    <article class="plan">
+      <h3>2. Nhận token</h3>
+      <p class="desc">SePay báo có tiền → website tự tạo token đúng thời hạn bạn chọn → gửi Gmail + hiện trong Lịch sử mua hàng.</p>
+    </article>
+    <article class="plan">
+      <h3>3. Kích hoạt &amp; đăng bài</h3>
+      <p class="desc">Mở app Facebook Group Poster → License → dán token → bắt đầu đăng nhóm. Mỗi token gắn 1 máy.</p>
+    </article>
+  </div>
+</section>
+
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

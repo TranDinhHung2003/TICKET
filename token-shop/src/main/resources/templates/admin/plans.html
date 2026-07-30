@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Bảng giá — Admin')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<div class="admin-layout">
+  <div th:replace="~{fragments :: admin-nav('plans')}"></div>
+  <div>
+    <div th:if="${success}" class="alert alert-ok" th:text="${success}"></div>
+    <div class="panel" style="margin-bottom:1rem">
+      <h2 style="font-family:var(--display);margin-top:0">Thêm gói</h2>
+      <form th:action="@{/admin/plans}" method="post" class="stack-form">
+        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+        <div class="row2">
+          <div class="field"><label>Tên gói</label><input name="name" required/></div>
+          <div class="field"><label>Giá VND</label><input type="number" name="priceVnd" required min="1000"/></div>
+        </div>
+        <div class="field"><label>Mô tả</label><input name="description"/></div>
+        <div class="row2">
+          <div class="field"><label>Phút</label><input type="number" name="minutes" value="0"/></div>
+          <div class="field"><label>Giờ</label><input type="number" name="hours" value="0"/></div>
+          <div class="field"><label>Ngày</label><input type="number" name="days" value="0"/></div>
+          <div class="field"><label>Tháng</label><input type="number" name="months" value="0"/></div>
+          <div class="field"><label>Năm</label><input type="number" name="years" value="0"/></div>
+          <div class="field"><label>Thứ tự</label><input type="number" name="sortOrder" value="0"/></div>
+        </div>
+        <button class="btn btn-primary" type="submit">Thêm gói</button>
+      </form>
+    </div>
+
+    <div class="panel" th:each="p : ${plans}" style="margin-bottom:1rem">
+      <form th:action="@{/admin/plans/{id}(id=${p.id})}" method="post" class="stack-form">
+        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+        <div class="row2">
+          <div class="field"><label>Tên</label><input name="name" th:value="${p.name}" required/></div>
+          <div class="field"><label>Giá VND</label><input type="number" name="priceVnd" th:value="${p.priceVnd}" required/></div>
+        </div>
+        <div class="field"><label>Mô tả</label><input name="description" th:value="${p.description}"/></div>
+        <div class="row2">
+          <div class="field"><label>Phút</label><input type="number" name="minutes" th:value="${p.minutes}"/></div>
+          <div class="field"><label>Giờ</label><input type="number" name="hours" th:value="${p.hours}"/></div>
+          <div class="field"><label>Ngày</label><input type="number" name="days" th:value="${p.days}"/></div>
+          <div class="field"><label>Tháng</label><input type="number" name="months" th:value="${p.months}"/></div>
+          <div class="field"><label>Năm</label><input type="number" name="years" th:value="${p.years}"/></div>
+          <div class="field"><label>Thứ tự</label><input type="number" name="sortOrder" th:value="${p.sortOrder}"/></div>
+        </div>
+        <label><input type="checkbox" name="active" value="true" th:checked="${p.active}"/> Đang bán</label>
+        <div>
+          <button class="btn btn-dark btn-sm" type="submit">Lưu</button>
+          <span class="muted" th:text="${'Hiện: ' + p.durationLabel()}"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

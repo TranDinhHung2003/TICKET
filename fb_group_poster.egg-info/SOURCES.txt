@@ -1,0 +1,12 @@
+README.md
+setup.py
+fb_group_poster.egg-info/PKG-INFO
+fb_group_poster.egg-info/SOURCES.txt
+fb_group_poster.egg-info/dependency_links.txt
+fb_group_poster.egg-info/entry_points.txt
+fb_group_poster.egg-info/requires.txt
+fb_group_poster.egg-info/top_level.txt
+fb_poster/__init__.py
+fb_poster/api.py
+fb_poster/cli.py
+fb_poster/poster.py

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Thanh toán SePay — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<section class="section">
+  <h2>Thanh toán chuyển khoản</h2>
+  <p class="sub">Quét QR MB Bank hoặc chuyển khoản đúng số tiền + nội dung. Hệ thống tự tạo token theo thời hạn gói bạn chọn.</p>
+
+  <div class="checkout">
+    <div class="panel">
+      <p><strong>Gói:</strong> <span th:text="${order.plan.name}">Gói</span></p>
+      <p><strong>Thời hạn token:</strong> <span th:text="${order.plan.durationLabel()}">30 ngày</span>
+        <span class="muted">(bắt đầu khi kích hoạt trên máy)</span></p>
+      <p><strong>Số tiền:</strong>
+        <span class="mono" th:text="${#numbers.formatInteger(order.amountVnd, 0, 'COMMA') + ' VND'}">0</span>
+      </p>
+      <p><strong>Nội dung CK (bắt buộc):</strong></p>
+      <div class="copy-row">
+        <code class="mono" id="payCode" th:text="${order.paymentCode}">FBPAY...</code>
+        <button class="btn btn-sm btn-ghost" type="button" onclick="navigator.clipboard.writeText(document.getElementById('payCode').innerText)">Copy</button>
+      </div>
+      <p style="margin-top:1rem"><strong>Ngân hàng:</strong> MB Bank (<span th:text="${bank.bankCode}">MB</span>)</p>
+      <p><strong>Số TK:</strong> <span class="mono" th:text="${bank.accountNumber}">0910108069999</span></p>
+      <p><strong>Chủ TK:</strong> <span th:text="${bank.accountName}">MB BANK</span></p>
+      <p class="muted">Đơn hết hạn lúc: <span th:text="${order.expiresAt}">...</span></p>
+      <p id="statusLine" class="muted">Đang chờ thanh toán…</p>
+
+      <div id="tokenBox" class="success-panel" style="display:none">
+        <div class="success-title">✓ Thanh toán thành công</div>
+        <p class="success-sub">Đã tự tạo token đúng thời hạn gói bạn mua:
+          <strong id="durVal" th:text="${order.plan.durationLabel()}"></strong>
+        </p>
+        <p><strong>Mã token của bạn:</strong></p>
+        <div class="copy-row">
+          <code class="mono token-big" id="tokenVal">—</code>
+          <button class="btn btn-sm btn-primary" type="button" id="copyTokenBtn"
+                  onclick="copyToken()">Copy token</button>
+        </div>
+        <p id="copyHint" class="muted" style="margin-top:.4rem;display:none">Đã copy vào clipboard.</p>
+        <p class="success-note">Token của bạn sẽ được lưu trong đơn hàng. Bạn có thể xem lại bất cứ lúc nào tại
+          <a th:href="@{/account/orders}">Lịch sử mua hàng</a>.
+        </p>
+      </div>
+    </div>
+    <div class="panel" style="text-align:center" id="qrPanel">
+      <img class="qr" th:src="${qrUrl}" alt="VietQR thanh toán"/>
+      <p class="muted">Quét VietQR bằng app ngân hàng</p>
+    </div>
+  </div>
+</section>
+<div th:replace="~{fragments :: footer}"></div>
+<script th:inline="javascript">
+  const statusUrl = /*[[@{/checkout/{id}/status(id=${order.id})}]]*/ '';
+  const alreadyPaid = /*[[${order.status.name() == 'PAID'}]]*/ false;
+  const existingToken = /*[[${order.issuedToken != null ? order.issuedToken : ''}]]*/ '';
+  const existingDur = /*[[${order.plan.durationLabel()}]]*/ '';
+
+  function copyToken() {
+    const t = document.getElementById('tokenVal').innerText.trim();
+    if (!t || t === '—') return;
+    navigator.clipboard.writeText(t).then(() => {
+      const h = document.getElementById('copyHint');
+      h.style.display = 'block';
+      setTimeout(() => h.style.display = 'none', 2000);
+    });
+  }
+
+  function showSuccess(token, duration) {
+    document.getElementById('statusLine').textContent = 'Trạng thái: Thanh toán thành công';
+    document.getElementById('tokenBox').style.display = 'block';
+    document.getElementById('tokenVal').textContent = token || '—';
+    if (duration) document.getElementById('durVal').textContent = duration;
+    const qr = document.getElementById('qrPanel');
+    if (qr) qr.style.opacity = '0.45';
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch(statusUrl, {headers: {'Accept':'application/json'}});
+      const data = await res.json();
+      if (data.paid) {
+        showSuccess(data.token, data.durationLabel || existingDur);
+        return;
+      }
+      document.getElementById('statusLine').textContent =
+        'Trạng thái: ' + data.status + ' — đang chờ SePay…';
+    } catch (e) {}
+    setTimeout(poll, 3000);
+  }
+
+  if (alreadyPaid && existingToken) {
+    showSuccess(existingToken, existingDur);
+  } else {
+    poll();
+  }
+</script>
+</body>
+</html>

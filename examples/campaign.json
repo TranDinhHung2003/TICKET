@@ -1,0 +1,21 @@
+[
+  {
+    "message": "🔥 Khuyến mãi lớn tháng 7!\n\nGiảm giá 50% tất cả sản phẩm chỉ trong hôm nay.\nSố lượng có hạn — đặt ngay kẻo hết!\n\n👉 Xem chi tiết tại: https://example.com/khuyen-mai",
+    "link": "https://example.com/khuyen-mai",
+    "image_url": "https://example.com/images/banner-sale.jpg",
+    "delay": 20,
+    "groups": [
+      {"id": "123456789", "name": "Nhóm Mua Bán Hà Nội"},
+      {"id": "987654321", "name": "Chợ Online Sài Gòn"},
+      {"id": "111222333", "name": "Forum Mua Sắm Đà Nẵng"}
+    ]
+  },
+  {
+    "message": "✨ Sản phẩm mới vừa ra mắt!\n\nĐừng bỏ lỡ cơ hội sở hữu sản phẩm hot nhất năm.\nGiao hàng toàn quốc — miễn phí vận chuyển đơn từ 200k.",
+    "link": "https://example.com/san-pham-moi",
+    "delay": 15,
+    "groups": [
+      {"id": "444555666", "name": "Hội Mua Bán Online Việt Nam"}
+    ]
+  }
+]

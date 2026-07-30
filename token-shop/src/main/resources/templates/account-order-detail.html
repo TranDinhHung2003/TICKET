@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments :: head('Chi tiết đơn — FB Poster')}"></head>
+<body>
+<div th:replace="~{fragments :: topbar}"></div>
+<section class="section">
+  <h2>Chi tiết đơn hàng</h2>
+  <div class="panel">
+    <p><strong>Mã thanh toán:</strong> <span class="mono" th:text="${order.paymentCode}"></span></p>
+    <p><strong>Gói:</strong> <span th:text="${order.plan.name}"></span> (<span th:text="${order.plan.durationLabel()}"></span>)</p>
+    <p><strong>Số tiền:</strong> <span th:text="${#numbers.formatInteger(order.amountVnd, 0, 'COMMA') + '₫'}"></span></p>
+    <p><strong>Trạng thái:</strong> <span th:text="${order.status}"></span></p>
+    <p><strong>Token:</strong> <span class="mono" th:text="${order.issuedToken != null ? order.issuedToken : 'Chưa cấp'}"></span></p>
+    <p th:if="${order.tokenExpiresAt != null}"><strong>Hết hạn token:</strong> <span th:text="${order.tokenExpiresAt}"></span></p>
+    <p th:if="${order.status.name() == 'PENDING'}"><a class="btn btn-primary" th:href="@{/checkout/{id}(id=${order.id})}">Tiếp tục thanh toán</a></p>
+    <p><a th:href="@{/account/orders}">← Quay lại lịch sử</a></p>
+  </div>
+</section>
+<div th:replace="~{fragments :: footer}"></div>
+</body>
+</html>

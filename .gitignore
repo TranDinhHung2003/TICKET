@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+dist_nuitka/
+build_protected/
+*.spec.bak
+.fb_poster_cookies.json
+fb_cookies.json
+.fb_poster/
+.env
+*.pye
+license_server/licenses.db
+license_server/*.db

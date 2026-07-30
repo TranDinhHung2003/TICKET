@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:fragment="head(title)">
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title th:text="${title}">FB Poster Shop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" th:href="@{/css/shop.css}"/>
+</head>
+<body>
+<th:block th:fragment="topbar">
+<header class="topbar">
+  <a class="brand" th:href="@{/}">FB Poster</a>
+  <nav>
+    <a th:href="@{/}">Mua token</a>
+    <a th:if="${currentUser != null}" th:href="@{/account/orders}">Lịch sử</a>
+    <a th:if="${currentUser != null and currentUser.role.name() == 'ADMIN'}" th:href="@{/admin}">Admin</a>
+    <a th:if="${currentUser == null}" th:href="@{/login}">Đăng nhập</a>
+    <a th:if="${currentUser == null}" class="btn btn-sm btn-primary" th:href="@{/register}">Đăng ký</a>
+    <form th:if="${currentUser != null}" th:action="@{/logout}" method="post" class="inline">
+      <button type="submit" class="linkish">Đăng xuất</button>
+    </form>
+  </nav>
+</header>
+<div class="contact-dock">
+  <a class="contact-btn zalo" href="https://zalo.me/0981227703" target="_blank" rel="noopener"
+     title="Zalo 0981227703">
+    <span class="contact-label">Zalo</span>
+    <span class="contact-num">0981227703</span>
+  </a>
+  <a class="contact-btn phone" href="tel:0981227703" title="Gọi 0981227703">
+    <span class="contact-label">Gọi</span>
+    <span class="contact-num">0981227703</span>
+  </a>
+</div>
+</th:block>
+
+<aside class="admin-nav" th:fragment="admin-nav(active)">
+  <div class="title">Admin</div>
+  <a th:href="@{/admin}" th:classappend="${active == 'dash'} ? ' active'">Tổng quan</a>
+  <a th:href="@{/admin/sales}" th:classappend="${active == 'sales'} ? ' active'">Log mua bán</a>
+  <a th:href="@{/admin/orders}" th:classappend="${active == 'orders'} ? ' active'">Đơn hàng</a>
+  <a th:href="@{/admin/plans}" th:classappend="${active == 'plans'} ? ' active'">Bảng giá</a>
+  <a th:href="@{/admin/tokens}" th:classappend="${active == 'tokens'} ? ' active'">Token</a>
+  <a th:href="@{/admin/users}" th:classappend="${active == 'users'} ? ' active'">Tài khoản</a>
+  <a th:href="@{/admin/settings}" th:classappend="${active == 'settings'} ? ' active'">Cấu hình</a>
+  <a th:href="@{/}">← Về shop</a>
+</aside>
+
+<footer class="site-footer" th:fragment="footer">
+  <p>Facebook Group Poster · Token Shop · Thanh toán SePay MB Bank</p>
+  <p class="copyright">© Bản quyền thuộc về <strong>TranDinhHung</strong>. Mọi quyền được bảo lưu.</p>
+</footer>
+</body>
+</html>
